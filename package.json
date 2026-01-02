@@ -34,7 +34,7 @@
     "minimatch": "^10.0.1",
     "node-cron": "^4.2.1",
     "octokit": "^5.0.2",
-    "probot": "^13.4.4",
+    "probot": "^14.2.4",
     "proxy-from-env": "^1.1.0",
     "undici": "^7.7.0"
   },
