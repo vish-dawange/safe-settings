@@ -23,7 +23,9 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
   rm -rf ./aws && \
   rm awscliv2.zip
 # Install sam cli
-RUN ARCH=$(uname -m) && \
+RUN ARCH_RAW=$(uname -m) && \
+  ARCH=$ARCH_RAW && \
+  if [ "$ARCH_RAW" = "aarch64" ]; then ARCH="arm64"; fi && \
   curl -L "https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-${ARCH}.zip" -o "aws-sam-cli.zip" && \
   unzip aws-sam-cli.zip -d sam-installation && \
   sudo ./sam-installation/install && \
