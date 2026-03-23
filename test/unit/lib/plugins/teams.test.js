@@ -23,8 +23,11 @@ describe('Teams', () => {
   beforeEach(() => {
     github = {
       paginate: jest.fn()
-        .mockImplementation(async (fetch) => {
-          const response = await fetch()
+        .mockImplementation(async (fetch, params) => {
+          if (typeof fetch !== 'function') {
+            return []
+          }
+          const response = await fetch(params)
           return response.data
         }),
       rest: {
@@ -43,7 +46,9 @@ describe('Teams', () => {
           })
         }
       },
-      request: jest.fn().mockResolvedValue()
+      request: Object.assign(jest.fn().mockResolvedValue(), {
+        endpoint: jest.fn().mockReturnValue({})
+      })
     }
   })
 

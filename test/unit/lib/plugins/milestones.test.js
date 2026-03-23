@@ -12,7 +12,7 @@ describe.skip('Milestones', () => {
       paginate: jest.fn().mockImplementation(() => Promise.resolve()),
       rest: {
         issues: {
-          listMilestonesForRepo: {
+          listMilestones: {
             endpoint: {
               merge: jest.fn().mockImplementation(() => {})
             }
