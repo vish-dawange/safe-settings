@@ -1,7 +1,6 @@
 FROM node:22-alpine
 WORKDIR /opt/safe-settings
 ENV NODE_ENV production
-ENV HOST=0.0.0.0
 ## Set the Labels
 LABEL version="1.0" \
       description="Probot app which is a modified version of Settings Probot GitHub App" \
