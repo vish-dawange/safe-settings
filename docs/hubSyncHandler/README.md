@@ -15,7 +15,7 @@ One central **master admin repository** (the hub) serves as the authoritative so
 ```mermaid
 graph TD
 A0(PR Closed Event) --> A1(HUB Admin Repo)
-A1(ORG Admin Repo) --> B(ORG Admin Repo)
+A1(HUB Admin Repo) --> B(ORG Admin Repo)
 A1(HUB Admin Repo) --> C(ORG Admin Repo)
 A1(HUB Admin Repo) --> D(ORG Admin Repo)
 ```
