@@ -1,6 +1,7 @@
 /* eslint-disable no-undef */
 class Octokit {}
 const Settings = require('../../../lib/settings')
+const DeploymentConfig = require('../../../lib/deploymentConfig')
 const yaml = require('js-yaml')
 // jest.mock('../../../lib/settings', () => {
 //   const OriginalSettings = jest.requireActual('../../../lib/settings')
@@ -464,7 +465,10 @@ repository:
   });
 
   describe('configvalidators and overridevalidators security', () => {
-    const DeploymentConfig = require('../../../lib/deploymentConfig')
+    afterEach(() => {
+      DeploymentConfig.configvalidators = {}
+      DeploymentConfig.overridevalidators = {}
+    })
 
     it('should not process configvalidators from user-supplied config', () => {
       const maliciousConfig = {
@@ -498,8 +502,6 @@ repository:
       const settings = createSettings({ restrictedRepos: [] })
       settings.validate('repository', {}, { name: 'test' })
       expect(mockValidator).toHaveBeenCalledTimes(1)
-      // Restore
-      DeploymentConfig.configvalidators = {}
     })
 
     it('validate() throws when DeploymentConfig configvalidator returns false', () => {
@@ -508,8 +510,6 @@ repository:
       }
       const settings = createSettings({ restrictedRepos: [] })
       expect(() => settings.validate('repository', {}, {})).toThrow('validation failed')
-      // Restore
-      DeploymentConfig.configvalidators = {}
     })
 
     it('validate() throws when DeploymentConfig overridevalidator returns false', () => {
@@ -518,8 +518,6 @@ repository:
       }
       const settings = createSettings({ restrictedRepos: [] })
       expect(() => settings.validate('repository', {}, {})).toThrow('override denied')
-      // Restore
-      DeploymentConfig.overridevalidators = {}
     })
   })
 }) // Settings Tests
