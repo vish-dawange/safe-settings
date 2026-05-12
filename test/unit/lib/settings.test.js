@@ -462,4 +462,64 @@ repository:
       );
     });
   });
+
+  describe('configvalidators and overridevalidators security', () => {
+    const DeploymentConfig = require('../../../lib/deploymentConfig')
+
+    it('should not process configvalidators from user-supplied config', () => {
+      const maliciousConfig = {
+        restrictedRepos: [],
+        configvalidators: [
+          { plugin: 'repository', script: 'return process.env', error: 'bad' }
+        ]
+      }
+      // Should not throw and should not build instance-level configvalidators
+      const settings = createSettings(maliciousConfig)
+      expect(settings.configvalidators).toBeUndefined()
+    })
+
+    it('should not process overridevalidators from user-supplied config', () => {
+      const maliciousConfig = {
+        restrictedRepos: [],
+        overridevalidators: [
+          { plugin: 'repository', script: 'return process.env', error: 'bad' }
+        ]
+      }
+      // Should not throw and should not build instance-level overridevalidators
+      const settings = createSettings(maliciousConfig)
+      expect(settings.overridevalidators).toBeUndefined()
+    })
+
+    it('validate() uses DeploymentConfig validators, not config-derived validators', () => {
+      const mockValidator = jest.fn().mockReturnValue(true)
+      DeploymentConfig.configvalidators = {
+        repository: { isValid: mockValidator, error: 'test error' }
+      }
+      const settings = createSettings({ restrictedRepos: [] })
+      settings.validate('repository', {}, { name: 'test' })
+      expect(mockValidator).toHaveBeenCalledTimes(1)
+      // Restore
+      DeploymentConfig.configvalidators = {}
+    })
+
+    it('validate() throws when DeploymentConfig configvalidator returns false', () => {
+      DeploymentConfig.configvalidators = {
+        repository: { isValid: () => false, error: 'validation failed' }
+      }
+      const settings = createSettings({ restrictedRepos: [] })
+      expect(() => settings.validate('repository', {}, {})).toThrow('validation failed')
+      // Restore
+      DeploymentConfig.configvalidators = {}
+    })
+
+    it('validate() throws when DeploymentConfig overridevalidator returns false', () => {
+      DeploymentConfig.overridevalidators = {
+        repository: { canOverride: () => false, error: 'override denied' }
+      }
+      const settings = createSettings({ restrictedRepos: [] })
+      expect(() => settings.validate('repository', {}, {})).toThrow('override denied')
+      // Restore
+      DeploymentConfig.overridevalidators = {}
+    })
+  })
 }) // Settings Tests
