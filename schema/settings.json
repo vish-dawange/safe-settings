@@ -191,6 +191,48 @@
       "items": {
         "$ref": "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.2022-11-28.json#/paths/~1orgs~1{org}~1rulesets/post/requestBody/content/application~1json/schema"
       }
+    },
+    "custom_repository_roles": {
+      "description": "Org-level custom repository roles. Only valid in the org-level settings.yml.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "base_role",
+          "permissions"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name of the custom role."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A short description of the role."
+          },
+          "base_role": {
+            "type": "string",
+            "enum": [
+              "read",
+              "triage",
+              "write",
+              "maintain"
+            ],
+            "description": "The system role from which this role inherits permissions."
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional fine-grained permissions included in this role."
+          }
+        }
+      }
     }
   }
 }
