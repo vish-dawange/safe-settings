@@ -458,4 +458,185 @@ repository:
       );
     });
   });
+
+  describe('getAllMatchingSubOrgSources', () => {
+    it('returns an empty set when subOrgConfigs is undefined', () => {
+      const settings = createSettings({})
+      settings.subOrgConfigs = undefined
+      const result = settings.getAllMatchingSubOrgSources('any-repo')
+      expect(result).toBeInstanceOf(Set)
+      expect(result.size).toBe(0)
+    })
+
+    it('returns an empty set when no suborg matches', () => {
+      const settings = createSettings({})
+      settings.subOrgConfigs = {
+        'frontend-*': { source: '.github/suborgs/frontend.yml' }
+      }
+      const result = settings.getAllMatchingSubOrgSources('backend-repo')
+      expect(result.size).toBe(0)
+    })
+
+    it('returns a single-entry set when one suborg glob matches', () => {
+      const settings = createSettings({})
+      settings.subOrgConfigs = {
+        'frontend-*': { source: '.github/suborgs/frontend.yml' },
+        'backend-*': { source: '.github/suborgs/backend.yml' }
+      }
+      const result = settings.getAllMatchingSubOrgSources('frontend-app')
+      expect(result.size).toBe(1)
+      expect(result.has('.github/suborgs/frontend.yml')).toBe(true)
+    })
+
+    it('does not alter getSubOrgConfig single-match behavior', () => {
+      const settings = createSettings({})
+      settings.subOrgConfigs = {
+        'frontend-*': { source: '.github/suborgs/frontend.yml', tag: 'A' }
+      }
+      const before = settings.getSubOrgConfig('frontend-app')
+      settings.getAllMatchingSubOrgSources('frontend-app')
+      const after = settings.getSubOrgConfig('frontend-app')
+      expect(after).toBe(before)
+      expect(after.tag).toBe('A')
+    })
+  })
+
+  describe('shouldConsiderReevaluation', () => {
+    let settings
+    const repo = { owner: 'o', repo: 'foo' }
+    beforeEach(() => {
+      settings = createSettings({})
+      settings.repoConfigs = {}
+    })
+
+    describe('with changeSignals (preferred path)', () => {
+      it('returns true when teams plugin reported changes', () => {
+        expect(settings.shouldConsiderReevaluation(repo, null, { teamsChanged: true })).toBe(true)
+      })
+
+      it('returns true when custom_properties plugin reported changes', () => {
+        expect(settings.shouldConsiderReevaluation(repo, null, { propertiesChanged: true })).toBe(true)
+      })
+
+      it('returns true on repository rename', () => {
+        expect(settings.shouldConsiderReevaluation(repo, null, { renamed: true })).toBe(true)
+      })
+
+      it('returns true on repository create', () => {
+        expect(settings.shouldConsiderReevaluation(repo, null, { created: true })).toBe(true)
+      })
+
+      it('returns false when all change signals are false (steady state)', () => {
+        // Pre-existing team that is already on the repo -> diffable reports no
+        // changes -> we must NOT trigger a re-eval reload.
+        settings.repoConfigs = { 'foo.yml': { teams: [{ name: 'core' }] } }
+        const signals = { teamsChanged: false, propertiesChanged: false, renamed: false, created: false }
+        expect(settings.shouldConsiderReevaluation(repo, { name: 'foo' }, signals)).toBe(false)
+      })
+    })
+
+    describe('without changeSignals (fallback)', () => {
+      it('returns false when there is no repo-yml entry', () => {
+        expect(settings.shouldConsiderReevaluation(repo, null)).toBe(false)
+        expect(settings.shouldConsiderReevaluation(repo, undefined)).toBe(false)
+      })
+
+      it('returns false when repo-yml has no teams/properties and no rename', () => {
+        settings.repoConfigs = { 'foo.yml': { repository: { name: 'foo' } } }
+        expect(settings.shouldConsiderReevaluation(repo, { name: 'foo' })).toBe(false)
+      })
+
+      it('returns true when repo-yml has teams', () => {
+        settings.repoConfigs = { 'foo.yml': { teams: [{ name: 'core' }] } }
+        expect(settings.shouldConsiderReevaluation(repo, { name: 'foo' })).toBe(true)
+      })
+
+      it('returns true when repo-yml has custom_properties', () => {
+        settings.repoConfigs = { 'foo.yaml': { custom_properties: [{ name: 'EDP', value: 'true' }] } }
+        expect(settings.shouldConsiderReevaluation(repo, { name: 'foo' })).toBe(true)
+      })
+
+      it('returns true on rename via repo.oldname', () => {
+        expect(settings.shouldConsiderReevaluation({ owner: 'o', repo: 'new', oldname: 'old' }, null)).toBe(true)
+      })
+
+      it('returns true on rename via repoConfig.oldname', () => {
+        expect(settings.shouldConsiderReevaluation(repo, { name: 'new', oldname: 'old' })).toBe(true)
+      })
+    })
+  })
+
+  describe('maybeReevaluateSuborg', () => {
+    it('is a no-op when reevaluateOnChange is false', async () => {
+      const settings = createSettings({})
+      settings.reevaluateOnChange = false
+      settings.repoConfigs = { 'r.yml': { teams: [{ name: 'core' }] } }
+      const reloadSpy = jest.spyOn(settings, 'reloadSubOrgConfigs').mockResolvedValue()
+      await settings.maybeReevaluateSuborg({ owner: 'o', repo: 'r' }, { name: 'r' }, new Set())
+      expect(reloadSpy).not.toHaveBeenCalled()
+    })
+
+    it('is a no-op when repo-yml has no triggers (teams/properties/rename)', async () => {
+      const settings = createSettings({})
+      settings.reevaluateOnChange = true
+      settings.repoConfigs = { 'r.yml': { repository: { name: 'r' } } }
+      const reloadSpy = jest.spyOn(settings, 'reloadSubOrgConfigs').mockResolvedValue()
+      await settings.maybeReevaluateSuborg({ owner: 'o', repo: 'r' }, { name: 'r' }, new Set())
+      expect(reloadSpy).not.toHaveBeenCalled()
+    })
+
+    it('is a no-op when changeSignals report no plugin changes (preexisting team)', async () => {
+      const settings = createSettings({})
+      settings.reevaluateOnChange = true
+      // repo-yml has teams, but plugin reported no change (team already on repo)
+      settings.repoConfigs = { 'r.yml': { teams: [{ name: 'core' }] } }
+      const reloadSpy = jest.spyOn(settings, 'reloadSubOrgConfigs').mockResolvedValue()
+      const updateSpy = jest.spyOn(settings, 'updateRepos').mockResolvedValue()
+      const signals = { teamsChanged: false, propertiesChanged: false, renamed: false, created: false }
+      await settings.maybeReevaluateSuborg({ owner: 'o', repo: 'r' }, { name: 'r' }, new Set(), signals)
+      expect(reloadSpy).not.toHaveBeenCalled()
+      expect(updateSpy).not.toHaveBeenCalled()
+    })
+
+    it('stops when the matched suborg source set is stable (no new sources)', async () => {
+      const settings = createSettings({})
+      settings.reevaluateOnChange = true
+      settings.subOrgConfigs = { 'r*': { source: '.github/suborgs/x.yml' } }
+      const updateSpy = jest.spyOn(settings, 'updateRepos').mockResolvedValue()
+      jest.spyOn(settings, 'reloadSubOrgConfigs').mockResolvedValue()
+      // pre = post = {x.yml} -> stable, no recursion
+      const pre = new Set(['.github/suborgs/x.yml'])
+      await settings.maybeReevaluateSuborg({ owner: 'o', repo: 'r1' }, { name: 'r1' }, pre, { teamsChanged: true })
+      expect(updateSpy).not.toHaveBeenCalled()
+    })
+
+    it('recurses once when a new suborg source appears, then stops at depth cap', async () => {
+      const settings = createSettings({})
+      settings.reevaluateOnChange = true
+      // After reload, a new suborg matches r1
+      settings.subOrgConfigs = { 'r*': { source: '.github/suborgs/new.yml' } }
+      settings.repoConfigs = { 'r1.yml': { teams: [{ name: 't' }] } }
+      jest.spyOn(settings, 'reloadSubOrgConfigs').mockResolvedValue()
+      jest.spyOn(settings, 'getRepoConfigs').mockResolvedValue({ 'r1.yml': { teams: [{ name: 't' }] } })
+      const updateSpy = jest.spyOn(settings, 'updateRepos').mockResolvedValue()
+      const pre = new Set() // pre-apply: nothing matched
+      await settings.maybeReevaluateSuborg({ owner: 'o', repo: 'r1' }, { name: 'r1' }, pre, { teamsChanged: true })
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(settings.reevaluationDepth.get('r1')).toBe(1)
+    })
+
+    it('respects MAX_REEVALUATION_DEPTH and logs a warning', async () => {
+      const settings = createSettings({})
+      settings.reevaluateOnChange = true
+      settings.reevaluationDepth.set('r1', 1) // already at cap
+      settings.repoConfigs = { 'r1.yml': { teams: [{ name: 't' }] } }
+      stubContext.log.warn = jest.fn()
+      const reloadSpy = jest.spyOn(settings, 'reloadSubOrgConfigs').mockResolvedValue()
+      const updateSpy = jest.spyOn(settings, 'updateRepos').mockResolvedValue()
+      await settings.maybeReevaluateSuborg({ owner: 'o', repo: 'r1' }, { name: 'r1' }, new Set(), { teamsChanged: true })
+      expect(reloadSpy).not.toHaveBeenCalled()
+      expect(updateSpy).not.toHaveBeenCalled()
+      expect(stubContext.log.warn).toHaveBeenCalledWith(expect.stringContaining('max depth'))
+    })
+  })
 }) // Settings Tests
