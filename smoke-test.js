@@ -66,7 +66,7 @@ const APP_ID = process.env.APP_ID
 const PRIVATE_KEY = (process.env.PRIVATE_KEY || '').replace(/\\n/g, '\n')
 
 const TEST_REPOS = ['test', 'demo-repo-service1', 'demo-repo-service2']
-const TEST_TEAMS = ['AD-GRP-PAYMENTS-PLATFORM-OWNERS', 'awesometeam-a-approvers']
+const TEST_TEAMS = ['AD-GRP-PAYMENTS-PLATFORM-OWNERS', 'awesometeam-a-approvers', 'jefeish-edj-test']
 
 const POLL_INTERVAL_MS = 5000
 const MAX_POLL_MS = 120000
@@ -453,6 +453,49 @@ teams:
     permission: push
 `
 
+const REPO_DEMO_SERVICE2_EXTERNAL_GROUP_YML = `# Safe-Settings Configuration
+repository:
+  name: demo-repo-service2
+  description: "Repository 2 sample"
+  visibility: private
+  default_branch: main
+  homepage: ""
+  auto_init: true
+  force_create: true
+  delete_branch_on_merge: true
+  archived: false
+  topics:
+    - topic1
+    - topic2
+
+teams:
+  - name: expert-services-developers
+    permission: push
+  - name: jefeish-edj-test
+    permission: push
+    external_group: jefeish-edj-test
+`
+
+const REPO_DEMO_SERVICE2_NO_EXTERNAL_GROUP_YML = `# Safe-Settings Configuration
+repository:
+  name: demo-repo-service2
+  description: "Repository 2 sample"
+  visibility: private
+  default_branch: main
+  homepage: ""
+  auto_init: true
+  force_create: true
+  delete_branch_on_merge: true
+  archived: false
+  topics:
+    - topic1
+    - topic2
+
+teams:
+  - name: expert-services-developers
+    permission: push
+`
+
 const SETTINGS_YML_ORG = `# Org-level safe-settings configuration
 
 rulesets:
@@ -801,6 +844,87 @@ async function phase7DemoRepo2 () {
   await deleteBranch(ORG, ADMIN_REPO, branch)
 }
 
+async function phase7bExternalGroupTeam () {
+  logPhase('Phase 7b: Add team with external_group to demo-repo-service2')
+  const branch = 'smoke-test-phase7b'
+  const defaultBranch = await getDefaultBranch()
+
+  // ── Step 1: Add the team with external_group mapping ──
+  await deleteBranch(ORG, ADMIN_REPO, branch)
+  await createBranch(ORG, ADMIN_REPO, branch)
+  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/demo-repo-service2.yml`, REPO_DEMO_SERVICE2_EXTERNAL_GROUP_YML, branch, 'Add team with external_group to demo-repo-service2')
+
+  const pr1 = await createPR(ORG, ADMIN_REPO, 'Smoke test: add external_group team to demo-repo-service2', branch, defaultBranch)
+  log('Waiting for NOP check run...')
+  await sleep(WEBHOOK_SETTLE_MS)
+  const checkRun1 = await waitForCheckRun(ORG, ADMIN_REPO, pr1.head.sha)
+  assert(checkRun1 !== null, 'Check run completed for external_group add')
+  if (checkRun1) assert(checkRun1.conclusion === 'success', `Check run conclusion is success (got: ${checkRun1.conclusion})`)
+
+  log('Merging PR...')
+  await mergePR(ORG, ADMIN_REPO, pr1.number)
+  await sleep(WEBHOOK_SETTLE_MS)
+
+  // Verify team is created and assigned to the repo
+  log('Checking team jefeish-edj-test is added to demo-repo-service2...')
+  const team = await poll(async () => {
+    try {
+      const { data: teams } = await octokit.rest.repos.listTeams({ owner: ORG, repo: 'demo-repo-service2' })
+      return teams.find(t => t.slug === 'jefeish-edj-test') || null
+    } catch { return null }
+  }, { desc: 'team jefeish-edj-test to be added to demo-repo-service2' })
+
+  assert(team !== null, 'Team jefeish-edj-test added to demo-repo-service2')
+
+  // Verify the external group (IdP) mapping exists on the team
+  log('Checking external group mapping on team jefeish-edj-test...')
+  const externalGroup = await poll(async () => {
+    try {
+      const { data } = await octokit.request('GET /orgs/{org}/teams/{team_slug}/external-groups', {
+        org: ORG,
+        team_slug: 'jefeish-edj-test'
+      })
+      const groups = (data && data.groups) || []
+      return groups.find(g => g.group_name === 'jefeish-edj-test') || null
+    } catch { return null }
+  }, { desc: 'external group mapping on jefeish-edj-test', timeout: 60000 })
+
+  assert(externalGroup !== null, 'External group jefeish-edj-test mapped to team jefeish-edj-test')
+
+  await deleteBranch(ORG, ADMIN_REPO, branch)
+
+  // ── Step 2: Remove the team from the YAML and verify removal ──
+  log('Removing team jefeish-edj-test from demo-repo-service2 config...')
+  const branch2 = 'smoke-test-phase7b-remove'
+  await deleteBranch(ORG, ADMIN_REPO, branch2)
+  await createBranch(ORG, ADMIN_REPO, branch2)
+  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/demo-repo-service2.yml`, REPO_DEMO_SERVICE2_NO_EXTERNAL_GROUP_YML, branch2, 'Remove external_group team from demo-repo-service2')
+
+  const pr2 = await createPR(ORG, ADMIN_REPO, 'Smoke test: remove external_group team from demo-repo-service2', branch2, defaultBranch)
+  log('Waiting for NOP check run...')
+  await sleep(WEBHOOK_SETTLE_MS)
+  const checkRun2 = await waitForCheckRun(ORG, ADMIN_REPO, pr2.head.sha)
+  assert(checkRun2 !== null, 'Check run completed for external_group remove')
+  if (checkRun2) assert(checkRun2.conclusion === 'success', `Check run conclusion is success (got: ${checkRun2.conclusion})`)
+
+  log('Merging PR...')
+  await mergePR(ORG, ADMIN_REPO, pr2.number)
+  await sleep(WEBHOOK_SETTLE_MS)
+
+  // Verify team is removed from the repo
+  log('Checking team jefeish-edj-test is removed from demo-repo-service2...')
+  const removedTeam = await poll(async () => {
+    try {
+      const { data: teams } = await octokit.rest.repos.listTeams({ owner: ORG, repo: 'demo-repo-service2' })
+      return teams.find(t => t.slug === 'jefeish-edj-test') ? false : true
+    } catch { return null }
+  }, { desc: 'team jefeish-edj-test to be removed from demo-repo-service2' })
+
+  assert(removedTeam === true, 'Team jefeish-edj-test removed from demo-repo-service2')
+
+  await deleteBranch(ORG, ADMIN_REPO, branch2)
+}
+
 async function phase8OrgSettings () {
   logPhase('Phase 8: Org-level settings')
   const branch = 'smoke-test-phase8'
@@ -913,6 +1037,7 @@ async function main () {
     await phase5Suborg()
     await phase6Archive()
     await phase7DemoRepo2()
+    await phase7bExternalGroupTeam()
     await phase8OrgSettings()
   } catch (err) {
     console.error(`\x1b[31mFatal error: ${err.message}\x1b[0m`)
