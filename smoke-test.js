@@ -9,6 +9,7 @@
  *      This is required for drift-remediation tests (Phases 2 & 3) so that
  *      changes appear as a human (not Bot) and trigger safe-settings webhooks.
  *   3. Run: `node smoke-test.js`
+ *      Add --interactive to pause after each phase for manual validation.
  *      Set SMOKE_VERBOSE=1 for live safe-settings logs.
  *
  * Auth:
@@ -19,6 +20,7 @@
 const { execSync, spawn } = require('child_process')
 const fs = require('fs')
 const path = require('path')
+const readline = require('readline')
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -75,6 +77,16 @@ const WEBHOOK_SETTLE_MS = 15000
 // Fine-grained PAT for drift tests (must appear as a human, not Bot)
 const GH_TOKEN = process.env.GH_TOKEN || ''
 
+// Interactive mode: pause after each phase for manual validation
+const INTERACTIVE = process.argv.includes('--interactive')
+
+class InteractiveExit extends Error {
+  constructor (action) {
+    super(`interactive:${action}`)
+    this.action = action
+  }
+}
+
 // ─── Octokit client (initialized in main) ────────────────────────────────────
 
 let octokit = null
@@ -107,6 +119,76 @@ async function poll (fn, { timeout = MAX_POLL_MS, interval = POLL_INTERVAL_MS, d
   }
   log(`  ⚠ Timed out waiting for ${desc}`)
   return null
+}
+
+// ─── Interactive mode ─────────────────────────────────────────────────────────
+
+let skipNext = false
+
+async function pause (phaseName) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    process.stdout.write(
+      `\n\x1b[33m[interactive] "${phaseName}" complete.\x1b[0m\n` +
+      `  \x1b[90mPress Enter to continue, 's' skip next, 'q' quit+teardown, 'a' abort: \x1b[0m`
+    )
+    rl.once('line', (answer) => {
+      const input = answer.trim().toLowerCase()
+      if (input === 's') resolve('skip')
+      else if (input === 'q') resolve('quit')
+      else if (input === 'a') resolve('abort')
+      else resolve('continue')
+      rl.close()
+    })
+    rl.once('close', () => resolve('continue'))
+  })
+}
+
+async function runPhase (label, fn) {
+  if (skipNext) {
+    log(`\x1b[33m[interactive] Skipping ${label}\x1b[0m`)
+    skipNext = false
+    return 'skipped'
+  }
+  await fn()
+  if (!INTERACTIVE) return 'continue'
+  const action = await pause(label)
+  if (action === 'skip') skipNext = true
+  return action
+}
+
+async function confirmMerge (owner, repo, prNumber) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    process.stdout.write(
+      `\n\x1b[33m[interactive] PR #${prNumber} is ready to merge.\x1b[0m\n` +
+      `  \x1b[90mPress Enter to merge, 'c' to close PR, 'q' quit+teardown, 'a' abort: \x1b[0m`
+    )
+    rl.once('line', (answer) => {
+      const input = answer.trim().toLowerCase()
+      if (input === 'c') resolve('close')
+      else if (input === 'q') resolve('quit')
+      else if (input === 'a') resolve('abort')
+      else resolve('merge')
+      rl.close()
+    })
+    rl.once('close', () => resolve('merge'))
+  })
+}
+
+async function safeMerge (owner, repo, prNumber) {
+  if (INTERACTIVE) {
+    const action = await confirmMerge(owner, repo, prNumber)
+    if (action !== 'merge') {
+      try { await octokit.rest.pulls.update({ owner, repo, pull_number: prNumber, state: 'closed' }) } catch { /* ok */ }
+      log(`\x1b[33m[interactive] PR #${prNumber} closed.\x1b[0m`)
+      if (action === 'quit' || action === 'abort') throw new InteractiveExit(action)
+      return false
+    }
+  }
+  log('Merging PR...')
+  await mergePR(owner, repo, prNumber)
+  return true
 }
 
 // ─── GitHub API helpers ──────────────────────────────────────────────────────
@@ -523,6 +605,51 @@ custom_repository_roles:
       - delete_alerts_code_scanning
 `
 
+// Phase 10a: settings.yml that disables custom_repository_roles at org-self,
+// and tries to add a NEW role ("disabled-role"). The new role must NOT be created.
+const SETTINGS_YML_DISABLE_CRR = `# Org-level settings with disable_plugins (custom_repository_roles)
+
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+
+rulesets:
+  - name: test
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - internal
+    rules:
+      - type: repository_delete
+
+custom_repository_roles:
+  - name: security-engineer
+    description: Can contribute code and manage the security pipeline
+    base_role: maintain
+    permissions:
+      - delete_alerts_code_scanning
+  - name: disabled-role
+    description: This role MUST NOT be created (custom_repository_roles disabled)
+    base_role: read
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+// Phase 10b: settings.yml with invalid disable_plugins entry — should fail validation
+const SETTINGS_YML_INVALID_DISABLE = `# Org-level settings with invalid disable_plugins
+
+disable_plugins:
+  - not-a-real-plugin
+`
+
 // ─── Test Phases ─────────────────────────────────────────────────────────────
 
 async function setup () {
@@ -565,8 +692,7 @@ async function phase1CreateRepo () {
   assert(checkRun !== null, 'Check run completed')
   if (checkRun) assert(checkRun.conclusion === 'success', `Check run conclusion is success (got: ${checkRun.conclusion})`)
 
-  log('Merging PR...')
-  await mergePR(ORG, ADMIN_REPO, pr.number)
+  if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
   // Validate repo
@@ -693,8 +819,7 @@ async function phase4DemoRepo1 () {
   assert(checkRun !== null, 'Check run completed')
   if (checkRun) assert(checkRun.conclusion === 'success', `Check run conclusion is success (got: ${checkRun.conclusion})`)
 
-  log('Merging PR...')
-  await mergePR(ORG, ADMIN_REPO, pr.number)
+  if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
   const repo = await poll(async () => {
@@ -750,8 +875,7 @@ async function phase5Suborg () {
   assert(checkRun !== null, 'Check run completed')
   if (checkRun) assert(checkRun.conclusion === 'success', `Check run conclusion is success (got: ${checkRun.conclusion})`)
 
-  log('Merging PR...')
-  await mergePR(ORG, ADMIN_REPO, pr.number)
+  if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
   log('Checking suborg ruleset on demo-repo-service1...')
@@ -782,8 +906,7 @@ async function phase6Archive () {
   assert(checkRun !== null, 'Check run completed')
   if (checkRun) assert(checkRun.conclusion === 'success', `Check run conclusion is success (got: ${checkRun.conclusion})`)
 
-  log('Merging PR...')
-  await mergePR(ORG, ADMIN_REPO, pr.number)
+  if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
   const repo = await poll(async () => {
@@ -813,8 +936,7 @@ async function phase7DemoRepo2 () {
   assert(checkRun !== null, 'Check run completed')
   if (checkRun) assert(checkRun.conclusion === 'success', `Check run conclusion is success (got: ${checkRun.conclusion})`)
 
-  log('Merging PR...')
-  await mergePR(ORG, ADMIN_REPO, pr.number)
+  if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
   const repo = await poll(async () => {
@@ -861,8 +983,7 @@ async function phase7bExternalGroupTeam () {
   assert(checkRun1 !== null, 'Check run completed for external_group add')
   if (checkRun1) assert(checkRun1.conclusion === 'success', `Check run conclusion is success (got: ${checkRun1.conclusion})`)
 
-  log('Merging PR...')
-  await mergePR(ORG, ADMIN_REPO, pr1.number)
+  if (!await safeMerge(ORG, ADMIN_REPO, pr1.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
   // Verify team is created and assigned to the repo
@@ -907,8 +1028,7 @@ async function phase7bExternalGroupTeam () {
   assert(checkRun2 !== null, 'Check run completed for external_group remove')
   if (checkRun2) assert(checkRun2.conclusion === 'success', `Check run conclusion is success (got: ${checkRun2.conclusion})`)
 
-  log('Merging PR...')
-  await mergePR(ORG, ADMIN_REPO, pr2.number)
+  if (!await safeMerge(ORG, ADMIN_REPO, pr2.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
   // Verify team is removed from the repo
@@ -941,8 +1061,7 @@ async function phase8OrgSettings () {
   assert(checkRun !== null, 'Check run completed')
   if (checkRun) assert(checkRun.conclusion === 'success', `Check run conclusion is success (got: ${checkRun.conclusion})`)
 
-  log('Merging PR...')
-  await mergePR(ORG, ADMIN_REPO, pr.number)
+  if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
   log('Checking custom repository roles...')
@@ -964,6 +1083,66 @@ async function phase8OrgSettings () {
   assert(orgRuleset !== null, 'Org ruleset "test" created')
 
   await deleteBranch(ORG, ADMIN_REPO, branch)
+}
+
+async function phase10DisablePlugins () {
+  logPhase('Phase 10: disable_plugins')
+
+  const defaultBranch = await getDefaultBranch()
+
+  // ── 10a: Org disables custom_repository_roles at target:self ──
+  // Add a NEW role "disabled-role" + keep existing "security-engineer".
+  // Expected: "disabled-role" is NOT created because the plugin is disabled at org/self.
+  {
+    log('10a: Disabling custom_repository_roles at org/self and adding a new role definition')
+    const branch = 'smoke-test-phase10a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_DISABLE_CRR, branch, '10a: disable custom_repository_roles')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '10a: disable custom_repository_roles', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '10a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `10a: NOP check run is success (got: ${checkRun.conclusion})`)
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    // Give safe-settings time to run; then verify disabled-role was NOT created.
+    await sleep(20000)
+    let disabledRoleExists = false
+    try {
+      const { data } = await octokit.request('GET /orgs/{org}/custom-repository-roles', { org: ORG })
+      disabledRoleExists = (data.custom_roles || []).some(r => r.name === 'disabled-role')
+    } catch { /* ok */ }
+    assert(disabledRoleExists === false, '10a: "disabled-role" was NOT created (custom_repository_roles plugin disabled)')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 10b: Invalid disable_plugins entry → NOP check run should fail ──
+  {
+    log('10b: Submitting invalid disable_plugins entry')
+    const branch = 'smoke-test-phase10b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_INVALID_DISABLE, branch, '10b: invalid disable_plugins')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '10b: invalid disable_plugins', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '10b: NOP check run completed')
+    if (checkRun) {
+      assert(checkRun.conclusion !== 'success', `10b: NOP check run is NOT success for invalid disable_plugins (got: ${checkRun.conclusion})`)
+    }
+
+    // Close PR without merging — invalid config should never be merged.
+    try { await octokit.rest.pulls.update({ owner: ORG, repo: ADMIN_REPO, pull_number: pr.number, state: 'closed' }) } catch { /* ok */ }
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
 }
 
 async function teardown () {
@@ -1028,22 +1207,38 @@ async function main () {
 ╚══════════════════════════════════════╝\x1b[0m
 `)
 
+  if (INTERACTIVE) log('\x1b[33m[interactive] Mode enabled — will pause after each phase.\x1b[0m')
+
+  let doTeardown = true
   try {
-    await setup()
-    await phase1CreateRepo()
-    await phase2DriftTeam()
-    await phase3DriftRuleset()
-    await phase4DemoRepo1()
-    await phase5Suborg()
-    await phase6Archive()
-    await phase7DemoRepo2()
-    await phase7bExternalGroupTeam()
-    await phase8OrgSettings()
+    const phases = [
+      ['Phase 0: Setup', setup],
+      ['Phase 1: Create test repo', phase1CreateRepo],
+      ['Phase 2: Drift remediation - Team removal', phase2DriftTeam],
+      ['Phase 3: Drift remediation - Rogue ruleset', phase3DriftRuleset],
+      ['Phase 4: Create demo-repo-service1', phase4DemoRepo1],
+      ['Phase 5: Create suborg config', phase5Suborg],
+      ['Phase 6: Archive demo-repo-service1', phase6Archive],
+      ['Phase 7: Create demo-repo-service2', phase7DemoRepo2],
+      ['Phase 7b: External group team', phase7bExternalGroupTeam],
+      ['Phase 8: Org-level settings', phase8OrgSettings],
+      ['Phase 10: disable_plugins', phase10DisablePlugins]
+    ]
+    for (const [label, fn] of phases) {
+      const action = await runPhase(label, fn)
+      if (action === 'abort') { doTeardown = false; break }
+      if (action === 'quit') break
+    }
   } catch (err) {
-    console.error(`\x1b[31mFatal error: ${err.message}\x1b[0m`)
-    console.error(err.stack)
+    if (err instanceof InteractiveExit) {
+      if (err.action === 'abort') doTeardown = false
+    } else {
+      console.error(`\x1b[31mFatal error: ${err.message}\x1b[0m`)
+      console.error(err.stack)
+    }
   } finally {
-    await teardown()
+    if (doTeardown) await teardown()
+    else log('\x1b[33m[interactive] Aborted — teardown skipped.\x1b[0m')
   }
 
   console.log(`

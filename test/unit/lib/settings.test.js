@@ -639,4 +639,369 @@ repository:
       expect(stubContext.log.warn).toHaveBeenCalledWith(expect.stringContaining('max depth'))
     })
   })
+
+  // ────────────────────────────────────────────────────────────────────────
+  // disable_plugins
+  // ────────────────────────────────────────────────────────────────────────
+  describe('disable_plugins', () => {
+    const DeploymentConfig = require('../../../lib/deploymentConfig')
+    let savedDeploymentDisable
+    let savedPlugins
+
+    beforeEach(() => {
+      savedDeploymentDisable = DeploymentConfig.config && DeploymentConfig.config.disable_plugins
+      if (DeploymentConfig.config) delete DeploymentConfig.config.disable_plugins
+      savedPlugins = { ...Settings.PLUGINS }
+    })
+
+    afterEach(() => {
+      if (DeploymentConfig.config) {
+        if (savedDeploymentDisable !== undefined) {
+          DeploymentConfig.config.disable_plugins = savedDeploymentDisable
+        } else {
+          delete DeploymentConfig.config.disable_plugins
+        }
+      }
+      Object.keys(Settings.PLUGINS).forEach(k => { Settings.PLUGINS[k] = savedPlugins[k] })
+    })
+
+    // ── normalizeDisableEntries ──────────────────────────────────────────
+    describe('normalizeDisableEntries', () => {
+      it('1. string shorthand defaults target=all and sets declaredAt', () => {
+        const settings = createSettings({})
+        const out = settings.normalizeDisableEntries(['labels'], 'org')
+        expect(out).toEqual([{ plugin: 'labels', target: 'all', declaredAt: 'org' }])
+      })
+
+      it('2. object form preserves each of self|children|all', () => {
+        const settings = createSettings({})
+        const out = settings.normalizeDisableEntries([
+          { plugin: 'rulesets', target: 'self' },
+          { plugin: 'branches', target: 'children' },
+          { plugin: 'labels', target: 'all' }
+        ], 'org')
+        expect(out).toEqual([
+          { plugin: 'rulesets', target: 'self', declaredAt: 'org' },
+          { plugin: 'branches', target: 'children', declaredAt: 'org' },
+          { plugin: 'labels', target: 'all', declaredAt: 'org' }
+        ])
+      })
+
+      it('3. unknown plugin name throws descriptive error', () => {
+        const settings = createSettings({})
+        expect(() => settings.normalizeDisableEntries(['nope'], 'org'))
+          .toThrow(/unknown plugin 'nope'/)
+      })
+
+      it('4. invalid target throws', () => {
+        const settings = createSettings({})
+        expect(() => settings.normalizeDisableEntries([{ plugin: 'labels', target: 'bogus' }], 'org'))
+          .toThrow(/invalid target 'bogus'/)
+      })
+
+      it('5. repository and archive are accepted as plugin names', () => {
+        const settings = createSettings({})
+        const out = settings.normalizeDisableEntries(['repository', 'archive'], 'org')
+        expect(out.map(e => e.plugin).sort()).toEqual(['archive', 'repository'])
+      })
+
+      it('6. at declaredAt=repo, target=children normalizes to all', () => {
+        const settings = createSettings({})
+        const out = settings.normalizeDisableEntries([{ plugin: 'labels', target: 'children' }], 'repo')
+        expect(out).toEqual([{ plugin: 'labels', target: 'all', declaredAt: 'repo' }])
+      })
+    })
+
+    // ── computeStripMap ──────────────────────────────────────────────────
+    describe('computeStripMap', () => {
+      const repoName = 'my-repo'
+
+      it('7. empty configs produce empty map (all four levels are empty sets)', () => {
+        const settings = createSettings({})
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const sm = settings.computeStripMap(repoName)
+        for (const level of ['deployment', 'org', 'suborg', 'repo']) {
+          expect(sm.get(level).size).toBe(0)
+        }
+      })
+
+      it('8. org target:self for rulesets strips only the org layer', () => {
+        const settings = createSettings({ disable_plugins: [{ plugin: 'rulesets', target: 'self' }] })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const sm = settings.computeStripMap(repoName)
+        expect([...sm.get('org')]).toEqual(['rulesets'])
+        expect(sm.get('suborg').size).toBe(0)
+        expect(sm.get('repo').size).toBe(0)
+        expect(sm.get('deployment').size).toBe(0)
+      })
+
+      it('9. org target:children for branches strips suborg+repo', () => {
+        const settings = createSettings({ disable_plugins: [{ plugin: 'branches', target: 'children' }] })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const sm = settings.computeStripMap(repoName)
+        expect(sm.get('org').size).toBe(0)
+        expect([...sm.get('suborg')]).toEqual(['branches'])
+        expect([...sm.get('repo')]).toEqual(['branches'])
+      })
+
+      it('10. org target:all for labels strips org+suborg+repo', () => {
+        const settings = createSettings({ disable_plugins: ['labels'] })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const sm = settings.computeStripMap(repoName)
+        expect([...sm.get('org')]).toEqual(['labels'])
+        expect([...sm.get('suborg')]).toEqual(['labels'])
+        expect([...sm.get('repo')]).toEqual(['labels'])
+      })
+
+      it('11. suborg target:all contributes only when a suborg matches the repo', () => {
+        const settings = createSettings({})
+        settings.subOrgConfigs = {
+          [repoName]: { disable_plugins: ['teams'], source: '.github/suborgs/x.yml' }
+        }
+        settings.repoConfigs = {}
+        const sm = settings.computeStripMap(repoName)
+        expect([...sm.get('suborg')]).toEqual(['teams'])
+        expect([...sm.get('repo')]).toEqual(['teams'])
+
+        const sm2 = settings.computeStripMap('other-repo')
+        expect(sm2.get('suborg').size).toBe(0)
+        expect(sm2.get('repo').size).toBe(0)
+      })
+
+      it('12. repo-declared target:all only strips repo layer', () => {
+        const settings = createSettings({})
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = { [`${repoName}.yml`]: { disable_plugins: ['labels'] } }
+        const sm = settings.computeStripMap(repoName)
+        expect(sm.get('org').size).toBe(0)
+        expect(sm.get('suborg').size).toBe(0)
+        expect([...sm.get('repo')]).toEqual(['labels'])
+      })
+
+      it('13. deployment target:children strips org+suborg+repo', () => {
+        DeploymentConfig.config.disable_plugins = [{ plugin: 'milestones', target: 'children' }]
+        const settings = createSettings({})
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const sm = settings.computeStripMap(repoName)
+        expect(sm.get('deployment').size).toBe(0)
+        expect([...sm.get('org')]).toEqual(['milestones'])
+        expect([...sm.get('suborg')]).toEqual(['milestones'])
+        expect([...sm.get('repo')]).toEqual(['milestones'])
+      })
+
+      it('14. union across layers: org self + repo all → org and repo both contain plugin', () => {
+        const settings = createSettings({ disable_plugins: [{ plugin: 'labels', target: 'self' }] })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = { [`${repoName}.yml`]: { disable_plugins: ['labels'] } }
+        const sm = settings.computeStripMap(repoName)
+        expect([...sm.get('org')]).toEqual(['labels'])
+        expect(sm.get('suborg').size).toBe(0)
+        expect([...sm.get('repo')]).toEqual(['labels'])
+      })
+    })
+
+    // ── childPluginsList integration ─────────────────────────────────────
+    describe('childPluginsList integration', () => {
+      it('15. org disables custom_properties (target:all) → not in plugin list even with repo override', () => {
+        const settings = createSettings({
+          disable_plugins: ['custom_properties'],
+          custom_properties: [{ property_name: 'a', value: '1' }]
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = { 'foo.yml': { custom_properties: [{ property_name: 'b', value: '2' }] } }
+        const list = settings.childPluginsList({ repo: 'foo' })
+        const pluginNames = list.map(([P]) => Object.keys(Settings.PLUGINS).find(k => Settings.PLUGINS[k] === P))
+        expect(pluginNames).not.toContain('custom_properties')
+      })
+
+      it('16. suborg-declared branches + suborg disable_plugins:branches → stripped for matched repo only', () => {
+        // Per the matrix, suborg target:all strips suborg+repo (NOT org).
+        // So we put branches only at suborg level for a meaningful test.
+        const settings = createSettings({})
+        settings.subOrgConfigs = {
+          'matched-repo': {
+            disable_plugins: ['branches'],
+            branches: [{ name: 'main', protection: {} }],
+            source: '.github/suborgs/x.yml'
+          },
+          'other-repo': {
+            // different suborg without disable; still declares branches
+            branches: [{ name: 'main', protection: {} }],
+            source: '.github/suborgs/y.yml'
+          }
+        }
+        settings.repoConfigs = {}
+        const matched = settings.childPluginsList({ repo: 'matched-repo' }).map(([P]) =>
+          Object.keys(Settings.PLUGINS).find(k => Settings.PLUGINS[k] === P))
+        const other = settings.childPluginsList({ repo: 'other-repo' }).map(([P]) =>
+          Object.keys(Settings.PLUGINS).find(k => Settings.PLUGINS[k] === P))
+        expect(matched).not.toContain('branches')
+        expect(other).toContain('branches')
+      })
+
+      it('17. repo-level labels + repo disable_plugins:labels → stripped for that repo only', () => {
+        // Repo target:all strips only the repo layer (matrix). To demonstrate
+        // scoping we put labels in each repo's own yml so the strip is effective.
+        const settings = createSettings({})
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {
+          'foo.yml': { disable_plugins: ['labels'], labels: { include: [{ name: 'bug' }] } },
+          'bar.yml': { labels: { include: [{ name: 'bug' }] } }
+        }
+        const foo = settings.childPluginsList({ repo: 'foo' }).map(([P]) =>
+          Object.keys(Settings.PLUGINS).find(k => Settings.PLUGINS[k] === P))
+        const bar = settings.childPluginsList({ repo: 'bar' }).map(([P]) =>
+          Object.keys(Settings.PLUGINS).find(k => Settings.PLUGINS[k] === P))
+        expect(foo).not.toContain('labels')
+        expect(bar).toContain('labels')
+      })
+
+      it('18. org target:children for variables: org-level variables still run per-repo (documented nuance)', () => {
+        // target:children strips from suborg+repo only; merged repo plugin
+        // config still inherits the org-level variables → plugin DOES run.
+        const settings = createSettings({
+          disable_plugins: [{ plugin: 'variables', target: 'children' }],
+          variables: [{ name: 'FOO', value: 'bar' }]
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const names = settings.childPluginsList({ repo: 'foo' }).map(([P]) =>
+          Object.keys(Settings.PLUGINS).find(k => Settings.PLUGINS[k] === P))
+        expect(names).toContain('variables')
+      })
+
+      it('19. org target:all for variables: variables plugin is fully suppressed', () => {
+        const settings = createSettings({
+          disable_plugins: [{ plugin: 'variables', target: 'all' }],
+          variables: [{ name: 'FOO', value: 'bar' }]
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const names = settings.childPluginsList({ repo: 'foo' }).map(([P]) =>
+          Object.keys(Settings.PLUGINS).find(k => Settings.PLUGINS[k] === P))
+        expect(names).not.toContain('variables')
+      })
+    })
+
+    // ── updateOrg integration ────────────────────────────────────────────
+    describe('updateOrg integration', () => {
+      function stubPlugin () {
+        const sync = jest.fn().mockResolvedValue([])
+        const ctor = jest.fn().mockImplementation(() => ({ sync }))
+        return { ctor, sync }
+      }
+
+      it('20. org disable rulesets (target:self) → rulesets plugin NOT invoked', async () => {
+        const { ctor } = stubPlugin()
+        Settings.PLUGINS.rulesets = ctor
+        const settings = createSettings({
+          disable_plugins: [{ plugin: 'rulesets', target: 'self' }],
+          rulesets: [{ name: 'foo' }]
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        await settings.updateOrg()
+        expect(ctor).not.toHaveBeenCalled()
+      })
+
+      it('21. org disable custom_repository_roles (shorthand) → plugin NOT invoked', async () => {
+        const { ctor } = stubPlugin()
+        Settings.PLUGINS.custom_repository_roles = ctor
+        const settings = createSettings({
+          disable_plugins: ['custom_repository_roles'],
+          custom_repository_roles: [{ name: 'sec' }]
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        await settings.updateOrg()
+        expect(ctor).not.toHaveBeenCalled()
+      })
+
+      it('22. deployment disable rulesets overrides org config that wants rulesets', async () => {
+        DeploymentConfig.config.disable_plugins = ['rulesets']
+        const { ctor } = stubPlugin()
+        Settings.PLUGINS.rulesets = ctor
+        const settings = createSettings({ rulesets: [{ name: 'foo' }] })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        await settings.updateOrg()
+        expect(ctor).not.toHaveBeenCalled()
+      })
+    })
+
+    // ── updateRepos integration ──────────────────────────────────────────
+    describe('updateRepos integration', () => {
+      it('23. org disable repository → RepoPlugin not instantiated', async () => {
+        const repoSync = jest.fn().mockResolvedValue([])
+        const repoCtor = jest.fn().mockImplementation(() => ({ sync: repoSync, renamed: false, created: false }))
+        Settings.PLUGINS.repository = repoCtor
+        const settings = createSettings({
+          disable_plugins: ['repository'],
+          repository: { name: 'will-not-be-used' }
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        // Avoid running child plugins (their internal logic isn't under test).
+        jest.spyOn(settings, 'childPluginsList').mockReturnValue([])
+        await settings.updateRepos({ owner: 'o', repo: 'r' })
+        expect(repoCtor).not.toHaveBeenCalled()
+      })
+
+      it('24. org disable archive → archive plugin getState NOT invoked', async () => {
+        const Archive = require('../../../lib/plugins/archive')
+        const getStateSpy = jest.spyOn(Archive.prototype, 'getState').mockResolvedValue({ shouldArchive: false, shouldUnarchive: false })
+        // RepoPlugin still runs; stub it to a no-op constructor.
+        const repoSync = jest.fn().mockResolvedValue([])
+        Settings.PLUGINS.repository = jest.fn().mockImplementation(() => ({ sync: repoSync, renamed: false, created: false }))
+        const settings = createSettings({
+          disable_plugins: ['archive'],
+          repository: { name: 'r' }
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        jest.spyOn(settings, 'childPluginsList').mockReturnValue([])
+        await settings.updateRepos({ owner: 'o', repo: 'r' })
+        expect(getStateSpy).not.toHaveBeenCalled()
+        getStateSpy.mockRestore()
+      })
+    })
+
+    // ── cascade enforcement ──────────────────────────────────────────────
+    describe('cascade enforcement', () => {
+      it('25. org target:all labels; repo declares empty disable_plugins → labels still disabled', () => {
+        const settings = createSettings({
+          disable_plugins: ['labels'],
+          labels: { include: [{ name: 'bug' }] }
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = { 'foo.yml': { disable_plugins: [] } }
+        const names = settings.childPluginsList({ repo: 'foo' }).map(([P]) =>
+          Object.keys(Settings.PLUGINS).find(k => Settings.PLUGINS[k] === P))
+        expect(names).not.toContain('labels')
+      })
+    })
+
+    // ── NOP mode ─────────────────────────────────────────────────────────
+    describe('NOP mode', () => {
+      it('26. each strip produces a NopCommand with type=INFO and plugin/level info', () => {
+        const settings = new Settings(true, stubContext, mockRepo, {
+          disable_plugins: ['labels'],
+          labels: { include: [{ name: 'bug' }] }
+        }, mockRef)
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        settings.childPluginsList({ repo: 'foo' })
+        const nopEntries = settings.results.filter(r => r && r.plugin === 'disable_plugins')
+        expect(nopEntries.length).toBeGreaterThan(0)
+        expect(nopEntries[0].type).toBe('INFO')
+        expect(nopEntries[0].action.msg).toMatch(/labels/)
+        expect(nopEntries[0].action.msg).toMatch(/declared by/)
+      })
+    })
+  })
 }) // Settings Tests

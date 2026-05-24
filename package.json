@@ -21,7 +21,8 @@
     "test:unit:watch": "npm run test:unit -- --watch",
     "test:integration": "jest --roots=lib --roots=test/integration",
     "test:integration:debug": "LOG_LEVEL=debug DEBUG=nock run-s test:integration",
-    "smoke-test": "node smoke-test.js"
+    "smoke-test": "node smoke-test.js",
+    "smoke-test:interactive": "node smoke-test.js --interactive"
   },
   "author": "Yadhav Jayaraman",
   "license": "ISC",

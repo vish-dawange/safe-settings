@@ -397,3 +397,17 @@ rulesets:
           negate: false
           operator: regex
           pattern: ".*\/.*"
+
+# disable_plugins (optional) — disable safe-settings plugins at the org layer.
+# Declared here:
+#   - target: self     → strips from the org layer only (affects org-level runs:
+#                        rulesets, custom_repository_roles).
+#   - target: children → strips from suborg + repo layers (per-repo runs).
+#   - target: all      → strips from org + suborg + repo layers.
+# Lower levels can never undo a strip declared at a higher level (union-only cascade).
+# See docs/README.md ("Disabling plugins") for the full strip matrix.
+#
+# disable_plugins:
+#   - plugin: custom_repository_roles
+#     target: self
+#   - branches             # shorthand → { plugin: branches, target: all }

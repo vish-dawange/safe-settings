@@ -233,6 +233,64 @@
           }
         }
       }
+    },
+    "disable_plugins": {
+      "description": "List of plugins to disable at this configuration layer. Each entry is either a plugin name (string shorthand, equivalent to target: all) or an object {plugin, target}. target=self disables the plugin at this layer only; target=children disables it at all lower layers; target=all disables it at this layer and all lower layers. Cascade is union-only; lower layers cannot re-enable a disabled plugin.",
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "repository",
+              "labels",
+              "collaborators",
+              "teams",
+              "milestones",
+              "branches",
+              "autolinks",
+              "validator",
+              "rulesets",
+              "environments",
+              "custom_properties",
+              "custom_repository_roles",
+              "variables",
+              "archive"
+            ]
+          },
+          {
+            "type": "object",
+            "required": ["plugin"],
+            "additionalProperties": false,
+            "properties": {
+              "plugin": {
+                "type": "string",
+                "enum": [
+                  "repository",
+                  "labels",
+                  "collaborators",
+                  "teams",
+                  "milestones",
+                  "branches",
+                  "autolinks",
+                  "validator",
+                  "rulesets",
+                  "environments",
+                  "custom_properties",
+                  "custom_repository_roles",
+                  "variables",
+                  "archive"
+                ]
+              },
+              "target": {
+                "type": "string",
+                "enum": ["self", "children", "all"],
+                "default": "all"
+              }
+            }
+          }
+        ]
+      }
     }
   }
 }

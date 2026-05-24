@@ -472,6 +472,82 @@ And the `checkrun` page will look like this:
 <img width="860" alt="image" src="https://github.com/github/safe-settings/assets/57544838/893ff4e6-904c-4a07-924a-7c23dc068983">
 </p>
 
+### Disabling plugins (`disable_plugins`)
+
+Any settings file (deployment-settings, org `settings.yml`, suborg, or repo) can
+contain a top-level `disable_plugins` list to turn off one or more safe-settings
+plugins for a given scope. Each entry is either:
+
+- A plugin name string (shorthand for `{ plugin: <name>, target: all }`), or
+- An object `{ plugin: <name>, target: self | children | all }` (default `target: all`).
+
+Valid plugin names: `repository`, `labels`, `collaborators`, `teams`,
+`milestones`, `branches`, `autolinks`, `validator`, `rulesets`, `environments`,
+`custom_properties`, `custom_repository_roles`, `variables`, `archive`.
+
+#### Strip matrix (which source layers are removed before merge)
+
+| Declared at                | `target: self`     | `target: children`        | `target: all`                 |
+| -------------------------- | ------------------ | ------------------------- | ----------------------------- |
+| deployment-settings        | deployment         | org + suborg + repo       | deployment + org + suborg + repo |
+| org `settings.yml`         | org                | suborg + repo             | org + suborg + repo           |
+| suborgs/`*.yml` (matched)  | suborg             | repo                      | suborg + repo                 |
+| repos/`*.yml`              | repo               | (no-op)                   | repo                          |
+
+When safe-settings builds the merged configuration for a repo, it strips the
+disabled plugin's keys from the indicated source layers before merging. For
+repo-level execution points (the `repository` and `archive` plugins) and
+org-level execution points (`rulesets`, `custom_repository_roles`), a disable
+that targets the corresponding layer also short-circuits the plugin run, and
+the skip is recorded as an INFO `NopCommand` in NOP mode (PR check run).
+
+#### Cascade rules
+
+- **Union-only.** Strips accumulate across layers; a lower-level config can add
+  more strips but can never undo a strip declared above it.
+- **No re-enable.** If `disable_plugins: [labels]` is set at the org layer, a
+  repo cannot re-enable `labels` for itself.
+
+#### Important limitation
+
+Because strips operate on **source layers**, a lower-level disable cannot
+remove configuration contributed by a higher layer. For example, if `branches`
+is defined at the org layer and a suborg adds
+`disable_plugins: [{plugin: branches, target: all}]`, the suborg's strip
+removes the `branches` key only from the suborg and repo layers — the org's
+`branches` config still merges in, and the branches plugin still runs.
+
+To fully suppress a plugin for matched repos, declare the disable at (or above)
+the layer that contributes the configuration — typically the org layer with
+`target: all`, or at the deployment layer.
+
+#### Examples
+
+Org `settings.yml` — disable `custom_repository_roles` only at the org execution
+point (rulesets still run):
+
+```yaml
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+```
+
+Org `settings.yml` — disable `branches` everywhere (shorthand):
+
+```yaml
+disable_plugins:
+  - branches
+```
+
+Suborg `suborgs/team-x.yml` — strip `labels` for matched repos (effective only
+if `labels` is not also defined at the org layer):
+
+```yaml
+disable_plugins:
+  - plugin: labels
+    target: all
+```
+
 ### The Settings Files
 
 The settings files can be used to set the policies at the `org`, `suborg` or `repo` level.
