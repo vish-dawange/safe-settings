@@ -1002,6 +1002,26 @@ repository:
         expect(nopEntries[0].action.msg).toMatch(/labels/)
         expect(nopEntries[0].action.msg).toMatch(/declared by/)
       })
+
+      it('27. dedup retains all disable_plugins NopCommands when multiple plugins are disabled for the same repo', () => {
+        // Disable both labels and teams at org level for all layers.
+        const settings = new Settings(true, stubContext, mockRepo, {
+          disable_plugins: ['labels', 'teams'],
+          labels: [{ name: 'bug', color: 'red' }],
+          teams: [{ name: 'core', permission: 'push' }]
+        }, mockRef)
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        settings.childPluginsList({ repo: 'foo' })
+        const nopEntries = settings.results.filter(r => r && r.plugin === 'disable_plugins')
+        // Both 'labels' and 'teams' disable messages must survive; the old
+        // dedup (key = type+repo+plugin+endpoint) would drop one of them
+        // because they share the same empty endpoint. The new key adds
+        // action.msg, so each unique message is kept.
+        const msgs = nopEntries.map(r => r.action.msg)
+        expect(msgs.some(m => /labels/.test(m))).toBe(true)
+        expect(msgs.some(m => /teams/.test(m))).toBe(true)
+      })
     })
   })
 }) // Settings Tests
