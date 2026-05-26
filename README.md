@@ -178,6 +178,27 @@ The App listens to the following webhook events:
 
 - __custom_property_values__: If new repository properties are set for a repository, `safe-settings` will run to so that if a sub-org config is defined by that property, it will be applied for the repo
 
+### Suborg re-evaluation after repo-level changes
+
+A repo's suborg membership can depend on state that is itself written by `safe-settings`:
+
+- `suborgteams` — repos belong to a suborg because a given team is granted access
+- `suborgproperties` — repos belong to a suborg because a custom property has a given value
+- `suborgrepos` — repos belong to a suborg because their name matches a glob
+
+When a repo-level change (a push to `.github/repos/<repo>.yml`, or a `repository.created` event for a brand-new repo) adds a team, sets a custom property, or creates a repo whose name matches a suborg's `suborgrepos` glob, the repo may *newly* match a suborg config that was not applied in the first pass.
+
+To handle this, after applying a repo-yml change `safe-settings` re-evaluates the repo's suborg membership and, if a new suborg now matches, runs the repo through the apply pipeline a second time so the suborg's settings are picked up in the same sync.
+
+**Scope:** Re-evaluation runs only on the repo-yml change paths (`Settings.sync` and the per-repo loop of `Settings.syncSelectedRepos`). Global settings changes (`syncAll`) and suborg-yml changes (`syncSubOrgs`) already iterate all relevant repos and do not need it.
+
+**Loop prevention.** Two guards prevent infinite re-evaluation:
+
+1. **Stability check (primary):** Before applying changes, `safe-settings` snapshots the set of suborg source paths that match the repo. After applying, it refreshes the suborg cache and recomputes the set. If no new suborg source appeared, re-evaluation stops.
+2. **Hard depth cap (safety net):** Each repo is re-evaluated at most `MAX_REEVALUATION_DEPTH = 1` time per sync. This resolves the dominant single-hop case (repo change → newly-matched suborg → apply suborg once) while preventing pathological chains (suborg A applies a team that activates suborg B that activates suborg C…). Chains beyond one hop are resolved on the next sync event, and a warning is logged when the cap is hit.
+
+**Trigger optimization.** Re-evaluation is skipped entirely when the resolved `repoConfig` has no `teams`, no `custom_properties`, and is not a rename — these are the only repo-level changes that can affect suborg matching.
+
 ### Use `safe-settings` to rename repos
 If you rename a `<repo.yml>` that corresponds to a repo, safe-settings will rename the repo to the new name. This behavior will take effect whether the env variable `BLOCK_REPO_RENAME_BY_HUMAN` is set or not.
 
@@ -451,6 +472,82 @@ And the `checkrun` page will look like this:
 <img width="860" alt="image" src="https://github.com/github/safe-settings/assets/57544838/893ff4e6-904c-4a07-924a-7c23dc068983">
 </p>
 
+### Disabling plugins (`disable_plugins`)
+
+Any settings file (deployment-settings, org `settings.yml`, suborg, or repo) can
+contain a top-level `disable_plugins` list to turn off one or more safe-settings
+plugins for a given scope. Each entry is either:
+
+- A plugin name string (shorthand for `{ plugin: <name>, target: all }`), or
+- An object `{ plugin: <name>, target: self | children | all }` (default `target: all`).
+
+Valid plugin names: `repository`, `labels`, `collaborators`, `teams`,
+`milestones`, `branches`, `autolinks`, `validator`, `rulesets`, `environments`,
+`custom_properties`, `custom_repository_roles`, `variables`, `archive`.
+
+#### Strip matrix (which source layers are removed before merge)
+
+| Declared at                | `target: self`     | `target: children`        | `target: all`                 |
+| -------------------------- | ------------------ | ------------------------- | ----------------------------- |
+| deployment-settings        | deployment         | org + suborg + repo       | deployment + org + suborg + repo |
+| org `settings.yml`         | org                | suborg + repo             | org + suborg + repo           |
+| suborgs/`*.yml` (matched)  | suborg             | repo                      | suborg + repo                 |
+| repos/`*.yml`              | repo               | (no-op)                   | repo                          |
+
+When safe-settings builds the merged configuration for a repo, it strips the
+disabled plugin's keys from the indicated source layers before merging. For
+repo-level execution points (the `repository` and `archive` plugins) and
+org-level execution points (`rulesets`, `custom_repository_roles`), a disable
+that targets the corresponding layer also short-circuits the plugin run, and
+the skip is recorded as an INFO `NopCommand` in NOP mode (PR check run).
+
+#### Cascade rules
+
+- **Union-only.** Strips accumulate across layers; a lower-level config can add
+  more strips but can never undo a strip declared above it.
+- **No re-enable.** If `disable_plugins: [labels]` is set at the org layer, a
+  repo cannot re-enable `labels` for itself.
+
+#### Important limitation
+
+Because strips operate on **source layers**, a lower-level disable cannot
+remove configuration contributed by a higher layer. For example, if `branches`
+is defined at the org layer and a suborg adds
+`disable_plugins: [{plugin: branches, target: all}]`, the suborg's strip
+removes the `branches` key only from the suborg and repo layers — the org's
+`branches` config still merges in, and the branches plugin still runs.
+
+To fully suppress a plugin for matched repos, declare the disable at (or above)
+the layer that contributes the configuration — typically the org layer with
+`target: all`, or at the deployment layer.
+
+#### Examples
+
+Org `settings.yml` — disable `custom_repository_roles` only at the org execution
+point (rulesets still run):
+
+```yaml
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+```
+
+Org `settings.yml` — disable `branches` everywhere (shorthand):
+
+```yaml
+disable_plugins:
+  - branches
+```
+
+Suborg `suborgs/team-x.yml` — strip `labels` for matched repos (effective only
+if `labels` is not also defined at the org layer):
+
+```yaml
+disable_plugins:
+  - plugin: labels
+    target: all
+```
+
 ### The Settings Files
 
 The settings files can be used to set the policies at the `org`, `suborg` or `repo` level.
@@ -573,7 +670,73 @@ You can pass environment variables; the easiest way to do it is via a `.env` fil
 
 3. __[Deploy and install the app](docs/deploy.md)__.  Alternatively, the __[GitHub Actions Guide](docs/github-action.md)__ describes how to run `safe-settings` with GitHub Actions.
 
+## Smoke Testing
 
+The repository includes an end-to-end smoke test script (`smoke-test.js`) that validates safe-settings against a live GitHub organization. It starts the app, creates repos/configs via the API, and verifies that safe-settings correctly applies and enforces settings.
+
+### Prerequisites
+
+- **Node.js** (same version used to run safe-settings)
+- **`gh` CLI** — authenticated and available on PATH (used for drift-remediation tests only)
+- A **GitHub App** installed on the target org with the required permissions
+- A `.env` file in the project root (see below)
+
+### Authentication
+
+The smoke test uses **two authentication methods**:
+
+- **GitHub App token** (via `APP_ID` + `PRIVATE_KEY`) — used for the majority of tests: creating configs, merging PRs, validating repos, teams, rulesets, custom properties, etc.
+- **Fine-grained PAT** (via `GH_TOKEN`) — used **only** in Phase 2 (team removal) and Phase 3 (rogue ruleset creation). These drift-remediation tests must appear as a human action because safe-settings ignores webhook events where `sender.type` is `Bot`.
+
+### Configuration
+
+Add the following to your `.env` file:
+
+| Variable | Description | Required |
+|---|---|---|
+| `GH_ORG` | Target GitHub organization (e.g. `my-org`) | Yes |
+| `APP_ID` | GitHub App ID | Yes |
+| `PRIVATE_KEY` | GitHub App private key (use `\n` for newlines) | Yes |
+| `WEBHOOK_PROXY_URL` | Smee.io proxy URL for webhooks | Yes |
+| `ADMIN_REPO` | Admin repo name (default: `admin`) | No |
+| `CONFIG_PATH` | Config path within admin repo (default: `.github`) | No |
+| `GH_TOKEN` | Fine-grained PAT with org admin + repo permissions | Yes |
+| `SMOKE_VERBOSE` | Set to `1` to show live safe-settings logs | No |
+
+### Running
+
+```bash
+npm run smoke-test
+# or
+node smoke-test.js
+```
+
+### What it tests
+
+The smoke test runs 9 phases:
+
+| Phase | Description |
+|---|---|
+| **Setup** | Initializes the admin repo with an empty `settings.yml`, removes stale test repos, and starts safe-settings |
+| **Phase 1** | Creates a repo config (`test`), validates NOP mode via check runs, merges, and verifies repo creation, teams, custom properties, and rulesets |
+| **Phase 2** | Removes a team from the repo and verifies safe-settings re-adds it (drift remediation) |
+| **Phase 3** | Creates a rogue ruleset and verifies safe-settings removes it (drift remediation) |
+| **Phase 4** | Creates `demo-repo-service1` with teams, topics, and branch protection |
+| **Phase 5** | Creates a suborg config and verifies org-scoped rulesets are applied to matching repos |
+| **Phase 6** | Archives `demo-repo-service1` and verifies the repo is archived |
+| **Phase 7** | Creates `demo-repo-service2` and verifies suborg rulesets are inherited |
+| **Phase 8** | Creates org-level settings (custom repository roles + org rulesets) and verifies they are applied |
+| **Teardown** | Shuts down safe-settings, deletes test repos, teams, custom roles, and rulesets |
+
+### Output
+
+The script uses colored terminal output with pass (✅) / fail (❌) indicators and prints a summary at the end:
+
+```
+══════════════════════════════════════
+  Results: 45 passed, 0 failed
+══════════════════════════════════════
+```
 
 
 ## License

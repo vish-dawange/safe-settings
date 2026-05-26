@@ -96,4 +96,190 @@ describe('Teams', () => {
       )
     }
   })
+
+  describe('external_group linking', () => {
+    const externalGroupName = 'Engineering - Expert Services'
+    const externalGroupId = 42
+
+    beforeEach(() => {
+      // request: default to no-current-link (404) so PATCH fires; override per-test as needed.
+      github.request = jest.fn().mockImplementation((endpoint) => {
+        if (typeof endpoint === 'string' && endpoint.startsWith('GET /orgs/{org}/teams/')) {
+          const err = new Error('not found')
+          err.status = 404
+          return Promise.reject(err)
+        }
+        return Promise.resolve({ data: {} })
+      })
+      github.request.endpoint = jest.fn().mockReturnValue('endpoint-stub')
+
+      // paginate: route the external-groups list call to a single page; keep
+      // the original implementation for other paginated endpoints. The real
+      // production code passes a map-function (3rd arg) that extracts the
+      // `groups` array from each page response -- we mimic the same response
+      // shape so that mapFn gets exercised.
+      const externalGroupsResponse = {
+        data: {
+          total_count: 2,
+          groups: [
+            { group_id: externalGroupId, group_name: externalGroupName },
+            { group_id: 99, group_name: 'Some Other Group' }
+          ]
+        }
+      }
+      github.paginate = jest.fn().mockImplementation(async (fetchOrEndpoint, params, mapFn) => {
+        if (fetchOrEndpoint === 'GET /orgs/{org}/external-groups') {
+          if (typeof mapFn === 'function') {
+            return mapFn(externalGroupsResponse)
+          }
+          return externalGroupsResponse.data.groups
+        }
+        if (typeof fetchOrEndpoint === 'function') {
+          const response = await fetchOrEndpoint()
+          return response.data
+        }
+        return []
+      })
+    })
+
+    it('looks up the group id by name and PATCHes the team link', async () => {
+      when(github.teams.getByName)
+        .defaultResolvedValue({})
+        .calledWith({ org, team_slug: addedTeamName })
+        .mockResolvedValue({ data: { id: addedTeamId } })
+
+      const plugin = configure([
+        { name: unchangedTeamName, permission: 'push' },
+        { name: addedTeamName, permission: 'pull', external_group: externalGroupName }
+      ])
+
+      await plugin.sync()
+
+      expect(github.paginate).toHaveBeenCalledWith(
+        'GET /orgs/{org}/external-groups',
+        { org, per_page: 100 },
+        expect.any(Function)
+      )
+      expect(github.request).toHaveBeenCalledWith(
+        'PATCH /orgs/{org}/teams/{team_slug}/external-groups',
+        { org, team_slug: addedTeamName, group_id: externalGroupId }
+      )
+      expect(plugin.hasChanges).toBe(true)
+    })
+
+    it('skips the PATCH when the team is already linked to the same group', async () => {
+      github.request = jest.fn().mockImplementation((endpoint, params) => {
+        if (endpoint === 'GET /orgs/{org}/teams/{team_slug}/external-groups') {
+          return Promise.resolve({ data: { groups: [{ group_id: externalGroupId, group_name: externalGroupName }] } })
+        }
+        return Promise.resolve({ data: {} })
+      })
+      github.request.endpoint = jest.fn().mockReturnValue('endpoint-stub')
+
+      const plugin = configure([
+        { name: unchangedTeamName, permission: 'push', external_group: externalGroupName }
+      ])
+
+      await plugin.sync()
+
+      expect(github.request).toHaveBeenCalledWith(
+        'GET /orgs/{org}/teams/{team_slug}/external-groups',
+        { org, team_slug: unchangedTeamName }
+      )
+      expect(github.request).not.toHaveBeenCalledWith(
+        'PATCH /orgs/{org}/teams/{team_slug}/external-groups',
+        expect.anything()
+      )
+    })
+
+    it('logs an error and skips when the external group name is not found', async () => {
+      const plugin = configure([
+        { name: unchangedTeamName, permission: 'push', external_group: 'Nonexistent Group' }
+      ])
+
+      await plugin.sync()
+
+      expect(github.request).not.toHaveBeenCalledWith(
+        'PATCH /orgs/{org}/teams/{team_slug}/external-groups',
+        expect.anything()
+      )
+      // logError pushes onto the errors array
+      expect(plugin.errors.some(e => /Nonexistent Group/.test(JSON.stringify(e)))).toBe(true)
+    })
+
+    it('in nop mode, emits an ERROR NopCommand when the external group is not found (so it appears in the PR check_run)', async () => {
+      const log = { debug: jest.fn(), error: console.error }
+      const errors = []
+      const Teams = require('../../../../lib/plugins/teams')
+      const plugin = new Teams(true, github, { owner: org, repo: 'test' }, [
+        { name: unchangedTeamName, permission: 'push', external_group: 'Nonexistent Group' }
+      ], log, errors)
+
+      const result = await plugin.sync()
+
+      expect(Array.isArray(result)).toBe(true)
+      const errorCmd = result.find(c => c && c.type === 'ERROR' && /Nonexistent Group/.test(JSON.stringify(c)))
+      expect(errorCmd).toBeDefined()
+      expect(github.request).not.toHaveBeenCalledWith(
+        'PATCH /orgs/{org}/teams/{team_slug}/external-groups',
+        expect.anything()
+      )
+    })
+
+    it('paginates the external-groups list only once per org across multiple syncs sharing the github client', async () => {
+      when(github.teams.getByName)
+        .defaultResolvedValue({})
+        .calledWith({ org, team_slug: addedTeamName })
+        .mockResolvedValue({ data: { id: addedTeamId } })
+
+      const plugin1 = configure([
+        { name: unchangedTeamName, permission: 'push', external_group: externalGroupName }
+      ])
+      const plugin2 = configure([
+        { name: addedTeamName, permission: 'pull', external_group: externalGroupName }
+      ])
+
+      await plugin1.sync()
+      await plugin2.sync()
+
+      const listCalls = github.paginate.mock.calls.filter(c => c[0] === 'GET /orgs/{org}/external-groups')
+      expect(listCalls).toHaveLength(1)
+    })
+
+    it('does not call the external-groups list endpoint when no entry uses external_group', async () => {
+      const plugin = configure([
+        { name: unchangedTeamName, permission: 'push' }
+      ])
+
+      await plugin.sync()
+
+      const listCalls = github.paginate.mock.calls.filter(c => c[0] === 'GET /orgs/{org}/external-groups')
+      expect(listCalls).toHaveLength(0)
+    })
+
+    it('in nop mode, emits a NopCommand and makes no PATCH', async () => {
+      const log = { debug: jest.fn(), error: console.error }
+      const errors = []
+      const Teams = require('../../../../lib/plugins/teams')
+      const plugin = new Teams(true, github, { owner: org, repo: 'test' }, [
+        { name: unchangedTeamName, permission: 'push', external_group: externalGroupName }
+      ], log, errors)
+
+      const result = await plugin.sync()
+
+      expect(Array.isArray(result)).toBe(true)
+      expect(result.some(c => /external group/.test(c.action) || /external group/.test(JSON.stringify(c)))).toBe(true)
+      // In nop mode no real linkage should be performed -- neither the
+      // idempotency GET nor the PATCH should hit the team-external-groups
+      // endpoint.
+      expect(github.request).not.toHaveBeenCalledWith(
+        'PATCH /orgs/{org}/teams/{team_slug}/external-groups',
+        expect.anything()
+      )
+      expect(github.request).not.toHaveBeenCalledWith(
+        'GET /orgs/{org}/teams/{team_slug}/external-groups',
+        expect.anything()
+      )
+    })
+  })
 })

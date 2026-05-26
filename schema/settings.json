@@ -191,6 +191,106 @@
       "items": {
         "$ref": "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.2022-11-28.json#/paths/~1orgs~1{org}~1rulesets/post/requestBody/content/application~1json/schema"
       }
+    },
+    "custom_repository_roles": {
+      "description": "Org-level custom repository roles. Only valid in the org-level settings.yml.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "base_role",
+          "permissions"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name of the custom role."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A short description of the role."
+          },
+          "base_role": {
+            "type": "string",
+            "enum": [
+              "read",
+              "triage",
+              "write",
+              "maintain"
+            ],
+            "description": "The system role from which this role inherits permissions."
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional fine-grained permissions included in this role."
+          }
+        }
+      }
+    },
+    "disable_plugins": {
+      "description": "List of plugins to disable at this configuration layer. Each entry is either a plugin name (string shorthand, equivalent to target: all) or an object {plugin, target}. target=self disables the plugin at this layer only; target=children disables it at all lower layers; target=all disables it at this layer and all lower layers. Cascade is union-only; lower layers cannot re-enable a disabled plugin.",
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "repository",
+              "labels",
+              "collaborators",
+              "teams",
+              "milestones",
+              "branches",
+              "autolinks",
+              "validator",
+              "rulesets",
+              "environments",
+              "custom_properties",
+              "custom_repository_roles",
+              "variables",
+              "archive"
+            ]
+          },
+          {
+            "type": "object",
+            "required": ["plugin"],
+            "additionalProperties": false,
+            "properties": {
+              "plugin": {
+                "type": "string",
+                "enum": [
+                  "repository",
+                  "labels",
+                  "collaborators",
+                  "teams",
+                  "milestones",
+                  "branches",
+                  "autolinks",
+                  "validator",
+                  "rulesets",
+                  "environments",
+                  "custom_properties",
+                  "custom_repository_roles",
+                  "variables",
+                  "archive"
+                ]
+              },
+              "target": {
+                "type": "string",
+                "enum": ["self", "children", "all"],
+                "default": "all"
+              }
+            }
+          }
+        ]
+      }
     }
   }
 }
