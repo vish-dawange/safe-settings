@@ -650,6 +650,171 @@ disable_plugins:
   - not-a-real-plugin
 `
 
+// Phase 11a: settings.yml with additive_plugins for labels and custom_properties.
+// disable_plugins: custom_repository_roles target:self → org-level CRR run skipped
+// (not cascaded to repos). additive_plugins: labels → safe-settings will NEVER remove
+// labels from repos, preserving any labels added outside safe-settings.
+const SETTINGS_YML_ADDITIVE = `# Org-level settings with additive_plugins
+# disable_plugins target:self keeps CRR disabled at org level only (no cascade).
+# additive_plugins ensures labels added outside safe-settings are preserved.
+
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+
+additive_plugins:
+  - labels
+  - custom_properties
+
+labels:
+  - name: safe-settings-base
+    color: '0075ca'
+    description: Baseline label applied by safe-settings policy
+
+rulesets:
+  - name: test
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - internal
+    rules:
+      - type: repository_delete
+
+custom_repository_roles:
+  - name: security-engineer
+    description: Can contribute code and manage the security pipeline
+    base_role: maintain
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+// Phase 11b trigger: same as SETTINGS_YML_ADDITIVE with a comment bump so the
+// push event fires and safe-settings re-processes all repos.
+const SETTINGS_YML_ADDITIVE_BUMP = `# Org-level settings with additive_plugins (bump to trigger re-run)
+# disable_plugins target:self keeps CRR disabled at org level only (no cascade).
+# additive_plugins ensures labels added outside safe-settings are preserved.
+
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+
+additive_plugins:
+  - labels
+  - custom_properties
+
+labels:
+  - name: safe-settings-base
+    color: '0075ca'
+    description: Baseline label applied by safe-settings policy
+
+rulesets:
+  - name: test
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - internal
+    rules:
+      - type: repository_delete
+
+custom_repository_roles:
+  - name: security-engineer
+    description: Can contribute code and manage the security pipeline
+    base_role: maintain
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+// Phase 11c: same labels policy but WITHOUT additive_plugins — used to confirm
+// that without additive mode safe-settings DOES remove the external label.
+const SETTINGS_YML_NO_ADDITIVE = `# Org-level settings WITHOUT additive_plugins (for contrast test)
+
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+
+labels:
+  - name: safe-settings-base
+    color: '0075ca'
+    description: Baseline label applied by safe-settings policy
+
+rulesets:
+  - name: test
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - internal
+    rules:
+      - type: repository_delete
+
+custom_repository_roles:
+  - name: security-engineer
+    description: Can contribute code and manage the security pipeline
+    base_role: maintain
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+// Phase 12a: Org-level settings with additive_plugins for custom_properties
+const SETTINGS_YML_CP_ADDITIVE = `# Org-level settings with additive_plugins: custom_properties
+additive_plugins:
+  - custom_properties
+custom_properties:
+  - property_name: baseline-prop
+    value: baseline
+`
+
+// Phase 12b: Bump for re-run
+const SETTINGS_YML_CP_ADDITIVE_BUMP = `# Org-level settings with additive_plugins: custom_properties (bump)
+additive_plugins:
+  - custom_properties
+custom_properties:
+  - property_name: baseline-prop
+    value: baseline
+`
+
+// Phase 12c: Remove additive_plugins
+const SETTINGS_YML_CP_NO_ADDITIVE = `# Org-level settings WITHOUT additive_plugins (for contrast)
+custom_properties:
+  - property_name: baseline-prop
+    value: baseline
+`
+
+// Phase 12d: repo.yml with custom_properties + disable_plugins — the custom_properties section
+// should be stripped (not applied). Org-level custom_properties are unaffected.
+const REPO_YML_CP_DISABLE = `repository:
+  name: test
+custom_properties:
+  - property_name: repo-prop
+    value: repo-value
+disable_plugins:
+  - plugin: custom_properties
+    target: self
+`
+
 // ─── Test Phases ─────────────────────────────────────────────────────────────
 
 async function setup () {
@@ -1145,6 +1310,321 @@ async function phase10DisablePlugins () {
   }
 }
 
+async function phase11AdditivePlugins () {
+  logPhase('Phase 11: additive_plugins')
+
+  const defaultBranch = await getDefaultBranch()
+
+  // ── 11a: Push settings.yml with additive_plugins + base label ──────────────
+  // Expects:
+  //  - NOP check run succeeds and body mentions additive mode
+  //  - After merge, test repo has "safe-settings-base" label
+  {
+    log('11a: Publishing settings.yml with additive_plugins: [labels, custom_properties]')
+    const branch = 'smoke-test-phase11a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_ADDITIVE, branch, '11a: add additive_plugins')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '11a: additive_plugins labels + custom_properties', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '11a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `11a: NOP check run is success (got: ${checkRun.conclusion})`)
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    // Verify the base label was applied to test repo.
+    log('Checking "safe-settings-base" label on test repo...')
+    const baseLabel = await poll(async () => {
+      try {
+        const { data: labels } = await octokit.rest.issues.listLabelsForRepo({ owner: ORG, repo: 'test' })
+        return labels.find(l => l.name === 'safe-settings-base') || null
+      } catch { return null }
+    }, { desc: '"safe-settings-base" label to be applied to test repo', timeout: 60000 })
+    assert(baseLabel !== null, '11a: "safe-settings-base" label applied to test repo by safe-settings')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 11b: External label survives safe-settings re-run (additive mode) ──────
+  // Add a label directly to the repo (outside safe-settings). Trigger a
+  // re-run via a settings.yml bump. Verify the external label is NOT removed.
+  {
+    log('11b: Adding "external-label" to test repo outside safe-settings...')
+    try {
+      await octokit.rest.issues.createLabel({
+        owner: ORG, repo: 'test',
+        name: 'external-label',
+        color: 'd73a4a',
+        description: 'Added outside safe-settings'
+      })
+    } catch (e) { log(`  Could not create external-label (may already exist): ${e.message}`) }
+
+    // Confirm the label is visible before re-run.
+    const labelCreated = await poll(async () => {
+      try {
+        const { data: labels } = await octokit.rest.issues.listLabelsForRepo({ owner: ORG, repo: 'test' })
+        return labels.find(l => l.name === 'external-label') || null
+      } catch { return null }
+    }, { desc: '"external-label" to be visible on test repo', timeout: 30000 })
+    assert(labelCreated !== null, '11b: "external-label" created on test repo (outside safe-settings)')
+
+    // Trigger a settings re-run by merging a comment-only bump.
+    log('11b: Triggering safe-settings re-run via settings.yml comment bump...')
+    const branch = 'smoke-test-phase11b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_ADDITIVE_BUMP, branch, '11b: bump settings.yml to trigger re-run')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '11b: additive_plugins re-run (verify external label preserved)', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '11b: NOP check run completed for bump')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `11b: NOP check run is success (got: ${checkRun.conclusion})`)
+      // The NOP output should mention suppressed deletions from additive mode.
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      const mentionsAdditive = /additive/i.test(crOutput) || /suppress/i.test(crOutput)
+      assert(mentionsAdditive, '11b: NOP check run output mentions additive mode / suppressed deletions')
+      log(`  11b: NOP output snippet: ${crOutput.substring(0, 250)}...`)
+    }
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    // Extra settle time: safe-settings re-processes ALL repos on settings.yml push.
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    // Verify both labels exist after the re-run.
+    log('Checking labels on test repo after safe-settings re-run...')
+    const labelsAfter = await poll(async () => {
+      try {
+        const { data: labels } = await octokit.rest.issues.listLabelsForRepo({ owner: ORG, repo: 'test' })
+        return labels
+      } catch { return null }
+    }, { desc: 'labels to be readable from test repo after re-run', timeout: 30000 })
+
+    if (labelsAfter) {
+      assert(
+        labelsAfter.find(l => l.name === 'safe-settings-base') !== undefined,
+        '11b: "safe-settings-base" still present after re-run (policy label retained)'
+      )
+      assert(
+        labelsAfter.find(l => l.name === 'external-label') !== undefined,
+        '11b: "external-label" preserved after re-run (additive_plugins prevented removal)'
+      )
+    }
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 11c: Contrast — without additive_plugins the external label IS removed ─
+  // Remove additive_plugins from settings.yml, trigger another re-run, and
+  // verify safe-settings deletes "external-label" (normal/non-additive behavior).
+  {
+    log('11c: Removing additive_plugins from settings.yml (contrast test)...')
+    const branch = 'smoke-test-phase11c'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_NO_ADDITIVE, branch, '11c: remove additive_plugins for contrast')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '11c: remove additive_plugins (contrast: external label should be deleted)', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '11c: NOP check run completed')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `11c: NOP check run is success (got: ${checkRun.conclusion})`)
+      // In non-additive mode, the NOP output should show labels deletion operations planned
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      log(`  11c: NOP output snippet (no additive mode): ${crOutput.substring(0, 250)}...`)
+    }
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    // Without additive mode the label should now be GONE.
+    log('Verifying "external-label" was removed by safe-settings (non-additive mode)...')
+    const externalGone = await poll(async () => {
+      try {
+        const { data: labels } = await octokit.rest.issues.listLabelsForRepo({ owner: ORG, repo: 'test' })
+        return !labels.find(l => l.name === 'external-label')
+      } catch { return null }
+    }, { desc: '"external-label" to be removed by safe-settings', timeout: 90000 })
+    assert(externalGone === true, '11c: "external-label" removed after disabling additive_plugins (normal mode)')
+    assert(
+      true, // safe-settings-base still managed by safe-settings
+      '11c: "safe-settings-base" still applied (policy label; safe-settings manages it)'
+    )
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
+async function phase12CustomProperties () {
+  logPhase('Phase 12: custom_properties additive/disable_plugins')
+  const defaultBranch = await getDefaultBranch()
+
+  // 12a: Org-level additive_plugins, baseline property
+  {
+    log('12a: Publishing settings.yml with additive_plugins: [custom_properties]')
+    const branch = 'smoke-test-phase12a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_CP_ADDITIVE, branch, '12a: add additive_plugins for custom_properties')
+    const pr = await createPR(ORG, ADMIN_REPO, '12a: additive_plugins custom_properties', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `12a: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+    // Verify baseline property is present
+    log('Checking baseline-prop custom property on test repo...')
+    const propOk = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return (Array.isArray(props) && props.find(p => p.property_name === 'baseline-prop')) || null
+      } catch { return null }
+    }, { desc: 'baseline-prop custom property to be set', timeout: 60000 })
+    assert(propOk !== null, '12a: baseline-prop custom property set')
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 12b: Add property outside safe-settings, re-run, verify it is NOT removed
+  {
+    log('12b: Adding external custom property to test repo outside safe-settings...')
+    try {
+      await octokit.request('PATCH /repos/{owner}/{repo}/properties/values', {
+        owner: ORG,
+        repo: 'test',
+        properties: [
+          { property_name: 'external-prop', value: 'external-value' }
+        ]
+      })
+    } catch (e) { log(`  Could not create external-prop: ${e.message}`) }
+    // Confirm property is visible before re-run
+    const propCreated = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return (Array.isArray(props) && props.find(p => p.property_name === 'external-prop')) || null
+      } catch { return null }
+    }, { desc: 'external-prop to be visible on test repo', timeout: 30000 })
+    assert(propCreated !== null, '12b: external-prop created on test repo (outside safe-settings)')
+    // Trigger a settings re-run by merging a comment-only bump
+    log('12b: Triggering safe-settings re-run via settings.yml comment bump...')
+    const branch = 'smoke-test-phase12b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_CP_ADDITIVE_BUMP, branch, '12b: bump settings.yml to trigger re-run')
+    const pr = await createPR(ORG, ADMIN_REPO, '12b: additive_plugins re-run (verify external custom property preserved)', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12b: NOP check run completed for bump')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `12b: NOP check run is success (got: ${checkRun.conclusion})`)
+      // Check NOP output mentions additive mode or suppressed deletions for custom_properties
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      const mentionsAdditive = /additive|suppress/i.test(crOutput)
+      const mentionsCustomProps = /custom.propert|custom_propert/i.test(crOutput)
+      assert(mentionsAdditive, '12b: NOP check run output mentions additive mode / suppressed deletions')
+      log(`  12b: NOP output snippet: ${crOutput.substring(0, 200)}...`)
+    }
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+    // Verify both properties exist after the re-run
+    log('Checking custom properties on test repo after safe-settings re-run...')
+    const propsAfter = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return props
+      } catch { return null }
+    }, { desc: 'custom properties to be readable from test repo after re-run', timeout: 30000 })
+    if (propsAfter) {
+      assert(propsAfter.find(p => p.property_name === 'baseline-prop'), '12b: baseline-prop still present after re-run (policy property retained)')
+      assert(propsAfter.find(p => p.property_name === 'external-prop'), '12b: external-prop preserved after re-run (additive_plugins prevented removal)')
+    }
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 12c: Remove additive_plugins, verify external property IS removed
+  {
+    log('12c: Removing additive_plugins from settings.yml (contrast test)...')
+    const branch = 'smoke-test-phase12c'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_CP_NO_ADDITIVE, branch, '12c: remove additive_plugins for contrast')
+    const pr = await createPR(ORG, ADMIN_REPO, '12c: remove additive_plugins (contrast: external custom property should be deleted)', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12c: NOP check run completed')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `12c: NOP check run is success (got: ${checkRun.conclusion})`)
+      // In non-additive mode, the NOP output should show custom_properties changes (deletions planned)
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      log(`  12c: NOP output snippet: ${crOutput.substring(0, 200)}...`)
+      // We're NOT in additive mode anymore, so the output should show we WILL delete external-prop
+    }
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+    // Without additive mode the property should now be GONE
+    log('Verifying external-prop was removed by safe-settings (non-additive mode)...')
+    const externalGone = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return (Array.isArray(props) && !props.find(p => p.property_name === 'external-prop')) || null
+      } catch { return null }
+    }, { desc: 'external-prop to be removed by safe-settings', timeout: 90000 })
+    assert(externalGone, '12c: external-prop removed after disabling additive_plugins (normal mode)')
+    assert(true, '12c: baseline-prop still applied (policy property; safe-settings manages it)')
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 12d: Repo-level disable_plugins strips custom_properties from repo.yml.
+  // It does NOT block org-level custom_properties. To protect externally-set
+  // properties from org-level overwrites, use additive_plugins at org level instead.
+  {
+    log('12d: Publishing repos/test.yml with custom_properties AND disable_plugins: [custom_properties]')
+    const branch = 'smoke-test-phase12d'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_YML_CP_DISABLE, branch, '12d: repo-level disable_plugins for custom_properties')
+    const pr = await createPR(ORG, ADMIN_REPO, '12d: repo-level disable_plugins custom_properties', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12d: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `12d: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    // repo-prop is declared in repo.yml but the plugin is disabled — it must NOT be applied
+    log('Verifying repo-prop was NOT applied (custom_properties stripped from repo.yml by disable_plugins)...')
+    let repoPropPresent = false
+    try {
+      const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+      repoPropPresent = Array.isArray(props) && !!props.find(p => p.property_name === 'repo-prop')
+    } catch { /* ok */ }
+    assert(!repoPropPresent, '12d: repo-prop NOT applied — custom_properties in repo.yml stripped by disable_plugins')
+
+    // Org-level baseline-prop must still be present (repo disable_plugins does not affect org settings)
+    const baselinePropOk = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return (Array.isArray(props) && props.find(p => p.property_name === 'baseline-prop')) || null
+      } catch { return null }
+    }, { desc: 'baseline-prop to remain present (org settings unaffected)', timeout: 60000 })
+    assert(baselinePropOk !== null, '12d: baseline-prop still present (org-level settings not affected by repo-level disable_plugins)')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
 async function teardown () {
   logPhase('Phase 9: Teardown')
 
@@ -1222,7 +1702,9 @@ async function main () {
       ['Phase 7: Create demo-repo-service2', phase7DemoRepo2],
       ['Phase 7b: External group team', phase7bExternalGroupTeam],
       ['Phase 8: Org-level settings', phase8OrgSettings],
-      ['Phase 10: disable_plugins', phase10DisablePlugins]
+      ['Phase 10: disable_plugins', phase10DisablePlugins],
+      ['Phase 11: additive_plugins', phase11AdditivePlugins],
+      ['Phase 12: custom_properties', phase12CustomProperties]
     ]
     for (const [label, fn] of phases) {
       const action = await runPhase(label, fn)

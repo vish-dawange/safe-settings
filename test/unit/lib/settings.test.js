@@ -1024,4 +1024,303 @@ repository:
       })
     })
   })
+
+  // ════════════════════════════════════════════════════════════════════════
+  describe('additive_plugins', () => {
+    // ── Settings.ADDITIVE_PLUGINS constant ───────────────────────────────
+    describe('Settings.ADDITIVE_PLUGINS', () => {
+      it('28. contains all 10 Diffable-extending plugin names', () => {
+        const expected = new Set([
+          'labels', 'collaborators', 'teams', 'milestones', 'autolinks',
+          'environments', 'custom_properties', 'variables', 'rulesets',
+          'custom_repository_roles'
+        ])
+        expect(Settings.ADDITIVE_PLUGINS).toEqual(expected)
+      })
+
+      it('29. does NOT include non-Diffable plugins', () => {
+        expect(Settings.ADDITIVE_PLUGINS.has('repository')).toBe(false)
+        expect(Settings.ADDITIVE_PLUGINS.has('archive')).toBe(false)
+        expect(Settings.ADDITIVE_PLUGINS.has('branches')).toBe(false)
+        expect(Settings.ADDITIVE_PLUGINS.has('validator')).toBe(false)
+      })
+    })
+
+    // ── normalizeAdditivePlugins ─────────────────────────────────────────
+    describe('normalizeAdditivePlugins', () => {
+      it('30. returns empty Set when additive_plugins is absent', () => {
+        const settings = createSettings({})
+        expect(settings.normalizeAdditivePlugins().size).toBe(0)
+      })
+
+      it('31. returns correct Set for valid plugin names', () => {
+        const settings = createSettings({ additive_plugins: ['labels', 'teams', 'milestones'] })
+        const result = settings.normalizeAdditivePlugins()
+        expect(result).toEqual(new Set(['labels', 'teams', 'milestones']))
+      })
+
+      it('32. all 10 Diffable plugins are accepted without error', () => {
+        const all = [...Settings.ADDITIVE_PLUGINS]
+        const settings = createSettings({ additive_plugins: all })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result.size).toBe(10)
+        expect(logErrorSpy).not.toHaveBeenCalled()
+        logErrorSpy.mockRestore()
+      })
+
+      it('33. unknown plugin name logs error and is excluded from Set', () => {
+        const settings = createSettings({ additive_plugins: ['labels', 'nope-plugin'] })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result.has('labels')).toBe(true)
+        expect(result.has('nope-plugin')).toBe(false)
+        expect(logErrorSpy).toHaveBeenCalledWith(expect.stringMatching(/unknown or non-Diffable plugin 'nope-plugin'/))
+        logErrorSpy.mockRestore()
+      })
+
+      it('34. non-Diffable plugin name (branches) logs error and is excluded', () => {
+        const settings = createSettings({ additive_plugins: ['branches'] })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result.has('branches')).toBe(false)
+        expect(logErrorSpy).toHaveBeenCalledWith(expect.stringMatching(/unknown or non-Diffable plugin 'branches'/))
+        logErrorSpy.mockRestore()
+      })
+
+      it('35. non-string entries log error and are skipped', () => {
+        const settings = createSettings({ additive_plugins: ['labels', 42, null] })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result).toEqual(new Set(['labels']))
+        expect(logErrorSpy).toHaveBeenCalledTimes(2) // 42 + null
+        logErrorSpy.mockRestore()
+      })
+
+      it('36. non-array value logs error and returns empty Set', () => {
+        const settings = createSettings({ additive_plugins: 'labels' })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result.size).toBe(0)
+        expect(logErrorSpy).toHaveBeenCalledWith(expect.stringMatching(/must be an array/))
+        logErrorSpy.mockRestore()
+      })
+    })
+
+    // ── childPluginsList returns triplets ────────────────────────────────
+    describe('childPluginsList triplets', () => {
+      it('37. each entry includes section name as 3rd element', () => {
+        const settings = createSettings({ labels: [{ name: 'bug', color: 'red' }] })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const list = settings.childPluginsList({ repo: 'foo' })
+        expect(list.length).toBeGreaterThan(0)
+        list.forEach(entry => {
+          expect(entry.length).toBe(3)
+          expect(typeof entry[2]).toBe('string')
+          expect(entry[2]).toMatch(/^[a-z_]+$/)
+        })
+      })
+
+      it('38. section names map to the correct Settings.PLUGINS keys', () => {
+        const settings = createSettings({
+          labels: [{ name: 'bug', color: 'red' }],
+          teams: [{ name: 'core', permission: 'push' }]
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const list = settings.childPluginsList({ repo: 'foo' })
+        list.forEach(([Plugin, , section]) => {
+          expect(Settings.PLUGINS[section]).toBe(Plugin)
+        })
+      })
+    })
+
+    // ── updateRepos integration: additive flag threading ─────────────────
+    describe('updateRepos integration: additive flag', () => {
+      it('39. plugin listed in additive_plugins has additive=true set before sync()', async () => {
+        const instances = []
+        const syncMock = jest.fn().mockResolvedValue([])
+        const LabelsCtor = jest.fn().mockImplementation(function (...args) {
+          this.sync = syncMock
+          this.hasChanges = false
+          instances.push(this)
+        })
+        const savedLabels = Settings.PLUGINS.labels
+        Settings.PLUGINS.labels = LabelsCtor
+
+        const repoSync = jest.fn().mockResolvedValue([])
+        Settings.PLUGINS.repository = jest.fn().mockImplementation(() => ({
+          sync: repoSync, renamed: false, created: false
+        }))
+
+        try {
+          const settings = createSettings({
+            additive_plugins: ['labels'],
+            labels: [{ name: 'bug', color: 'red' }]
+          })
+          settings.subOrgConfigs = {}
+          settings.repoConfigs = {}
+          // Clear subOrgConfigMap so the "suborg-change early return" in
+          // updateRepos does not fire (mockSubOrg='frontend' sets it in ctor).
+          settings.subOrgConfigMap = null
+          // Mock childPluginsList to return just the labels triplet so we can
+          // control what updateRepos sees without mocking all other plugins.
+          jest.spyOn(settings, 'childPluginsList').mockReturnValue([
+            [LabelsCtor, [{ name: 'bug', color: 'red' }], 'labels']
+          ])
+          jest.spyOn(settings, 'maybeReevaluateSuborg').mockResolvedValue(undefined)
+          await settings.updateRepos({ owner: 'o', repo: 'r' })
+          expect(instances.length).toBeGreaterThan(0)
+          // Every labels instance must have additive=true
+          instances.forEach(inst => expect(inst.additive).toBe(true))
+        } finally {
+          Settings.PLUGINS.labels = savedLabels
+        }
+      })
+
+      it('40. plugin NOT in additive_plugins has additive=false (default)', async () => {
+        const instances = []
+        const syncMock = jest.fn().mockResolvedValue([])
+        const TeamsCtor = jest.fn().mockImplementation(function (...args) {
+          this.sync = syncMock
+          this.hasChanges = false
+          instances.push(this)
+        })
+        const savedTeams = Settings.PLUGINS.teams
+        Settings.PLUGINS.teams = TeamsCtor
+
+        Settings.PLUGINS.repository = jest.fn().mockImplementation(() => ({
+          sync: jest.fn().mockResolvedValue([]), renamed: false, created: false
+        }))
+
+        try {
+          const settings = createSettings({
+            additive_plugins: ['labels'], // teams is NOT listed
+            teams: [{ name: 'core', permission: 'push' }]
+          })
+          settings.subOrgConfigs = {}
+          settings.repoConfigs = {}
+          // Clear subOrgConfigMap so the "suborg-change early return" does not fire.
+          settings.subOrgConfigMap = null
+          jest.spyOn(settings, 'childPluginsList').mockReturnValue([
+            [TeamsCtor, [{ name: 'core', permission: 'push' }], 'teams']
+          ])
+          jest.spyOn(settings, 'maybeReevaluateSuborg').mockResolvedValue(undefined)
+          await settings.updateRepos({ owner: 'o', repo: 'r' })
+          expect(instances.length).toBeGreaterThan(0)
+          instances.forEach(inst => expect(inst.additive).toBe(false))
+        } finally {
+          Settings.PLUGINS.teams = savedTeams
+        }
+      })
+    })
+
+    // ── Diffable.sync() additive behaviour ───────────────────────────────
+    describe('Diffable.sync() additive behaviour', () => {
+      const Diffable = require('../../../lib/plugins/diffable')
+
+      // Minimal concrete Diffable subclass for testing.
+      class TestDiffable extends Diffable {
+        constructor (nop, entries) {
+          super(nop, {}, { owner: 'o', repo: 'r' }, entries, { debug: jest.fn(), info: jest.fn(), error: jest.fn() }, [])
+        }
+
+        find () { return Promise.resolve(this._existing || []) }
+        comparator (a, b) { return a.name === b.name }
+        changed (a, b) { return a.value !== b.value }
+        add (attrs) { return Promise.resolve([]) }
+        update (existing, attrs) { return Promise.resolve([]) }
+        remove (existing) { return Promise.resolve([]) }
+      }
+
+      it('41. additive=false → remove() is called for unmatched existing entries', async () => {
+        const plugin = new TestDiffable(false, [{ name: 'keep', value: '1' }])
+        plugin._existing = [
+          { name: 'keep', value: '1' },
+          { name: 'gone', value: '2' } // this one has no match in entries
+        ]
+        plugin.additive = false
+        const removeSpy = jest.spyOn(plugin, 'remove').mockResolvedValue([])
+        await plugin.sync()
+        expect(removeSpy).toHaveBeenCalledTimes(1)
+        expect(removeSpy).toHaveBeenCalledWith(expect.objectContaining({ name: 'gone' }))
+        removeSpy.mockRestore()
+      })
+
+      it('42. additive=true → remove() is NOT called even when existing entries have no YAML match', async () => {
+        const plugin = new TestDiffable(false, [{ name: 'keep', value: '1' }])
+        plugin._existing = [
+          { name: 'keep', value: '1' },
+          { name: 'gone', value: '2' }
+        ]
+        plugin.additive = true
+        const removeSpy = jest.spyOn(plugin, 'remove').mockResolvedValue([])
+        await plugin.sync()
+        expect(removeSpy).not.toHaveBeenCalled()
+        removeSpy.mockRestore()
+      })
+
+      it('43. additive=true → add() is still called for new YAML entries', async () => {
+        const plugin = new TestDiffable(false, [
+          { name: 'existing', value: '1' },
+          { name: 'new-entry', value: '2' }
+        ])
+        plugin._existing = [{ name: 'existing', value: '1' }]
+        plugin.additive = true
+        const addSpy = jest.spyOn(plugin, 'add').mockResolvedValue([])
+        const removeSpy = jest.spyOn(plugin, 'remove').mockResolvedValue([])
+        await plugin.sync()
+        expect(addSpy).toHaveBeenCalledWith(expect.objectContaining({ name: 'new-entry' }))
+        expect(removeSpy).not.toHaveBeenCalled()
+        addSpy.mockRestore()
+        removeSpy.mockRestore()
+      })
+
+      it('44. additive=true → update() is still called for changed entries', async () => {
+        const plugin = new TestDiffable(false, [{ name: 'item', value: 'new' }])
+        plugin._existing = [{ name: 'item', value: 'old' }]
+        plugin.additive = true
+        const updateSpy = jest.spyOn(plugin, 'update').mockResolvedValue([])
+        const removeSpy = jest.spyOn(plugin, 'remove').mockResolvedValue([])
+        await plugin.sync()
+        expect(updateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'item', value: 'old' }),
+          expect.objectContaining({ name: 'item', value: 'new' })
+        )
+        expect(removeSpy).not.toHaveBeenCalled()
+        updateSpy.mockRestore()
+        removeSpy.mockRestore()
+      })
+
+      it('45. NOP mode + additive=true + deletions present → INFO NopCommand about suppressed deletions', async () => {
+        const plugin = new TestDiffable(true, [{ name: 'keep', value: '1' }])
+        plugin._existing = [
+          { name: 'keep', value: '1' },
+          { name: 'gone', value: '2' }
+        ]
+        plugin.additive = true
+        const result = await plugin.sync()
+        const suppressed = result.flat().filter(cmd =>
+          cmd && cmd.type === 'INFO' && /suppressed by additive_plugins/i.test(cmd.action.msg)
+        )
+        expect(suppressed.length).toBeGreaterThan(0)
+        expect(suppressed[0].action.msg).toMatch(/1 deletion/)
+      })
+
+      it('46. NOP mode + additive=true + NO deletions → no suppressed message emitted', async () => {
+        const plugin = new TestDiffable(true, [{ name: 'item', value: '1' }])
+        plugin._existing = [{ name: 'item', value: '1' }] // identical → no changes at all
+        plugin.additive = true
+        const result = await plugin.sync()
+        if (result) {
+          const suppressed = result.flat().filter(cmd =>
+            cmd && cmd.action && /suppressed by additive_plugins/i.test(cmd.action.msg)
+          )
+          expect(suppressed.length).toBe(0)
+        }
+        // result may be undefined (no changes) which is also correct
+      })
+    })
+  })
 }) // Settings Tests

@@ -411,3 +411,20 @@ rulesets:
 #   - plugin: custom_repository_roles
 #     target: self
 #   - branches             # shorthand → { plugin: branches, target: all }
+
+# additive_plugins (optional) — run selected Diffable plugins in additive mode.
+# In additive mode a plugin will only add and update entries; it will never
+# call remove(). Items that exist on GitHub but are absent from the YAML are
+# preserved. This is useful when you want safe-settings to enforce a baseline
+# of settings while still allowing teams to manage their own extra labels,
+# teams, environments, etc.
+#
+# Supported plugins (must extend Diffable):
+#   labels, collaborators, teams, milestones, autolinks, environments,
+#   custom_properties, variables, rulesets, custom_repository_roles
+#
+# NOT supported (non-Diffable): repository, archive, branches, validator
+#
+# additive_plugins:
+#   - labels          # never delete labels not in YAML
+#   - collaborators   # never remove collaborators not in YAML

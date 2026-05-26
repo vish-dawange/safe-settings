@@ -548,6 +548,50 @@ disable_plugins:
     target: all
 ```
 
+### Additive plugins (`additive_plugins`)
+
+`additive_plugins` is the complementary "soft mode" to `disable_plugins`. When a
+Diffable plugin is listed here, safe-settings will only **add** and **update**
+entries — it will **never call `remove()`**. Items that exist on GitHub but are
+absent from the YAML are preserved, effectively merging external changes with
+your policy rather than overwriting them.
+
+Declare `additive_plugins` only in `settings.yml` (org level) to keep behaviour
+consistent across all repositories.
+
+**Supported plugins** (all extend `Diffable`):
+
+| Plugin | Effect in additive mode |
+|--------|------------------------|
+| `labels` | Extra labels not in YAML are kept |
+| `collaborators` | Extra collaborators not in YAML are kept |
+| `teams` | Extra team permissions not in YAML are kept |
+| `milestones` | Extra milestones not in YAML are kept |
+| `autolinks` | Extra autolinks not in YAML are kept |
+| `environments` | Extra environments not in YAML are kept |
+| `custom_properties` | Extra property values not in YAML are kept |
+| `variables` | Extra variables not in YAML are kept |
+| `rulesets` | Extra rulesets not in YAML are kept |
+| `custom_repository_roles` | Extra custom roles not in YAML are kept |
+
+> [!important]
+> `repository`, `archive`, `branches`, and `validator` are **not** supported.
+> Listing them in `additive_plugins` will produce a validation error.
+
+**NOP mode**: when `additive_plugins` is active and the diff would produce
+deletions, an informational message — *"Additive mode active: N deletion(s)
+suppressed by additive_plugins"* — is included in the PR check-run comment so
+reviewers can see what is being preserved.
+
+**Example** — never delete labels or collaborators that were added outside of
+safe-settings:
+
+```yaml
+additive_plugins:
+  - labels
+  - collaborators
+```
+
 ### The Settings Files
 
 The settings files can be used to set the policies at the `org`, `suborg` or `repo` level.
