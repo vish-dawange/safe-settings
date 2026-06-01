@@ -1,22 +1,35 @@
 "use client"
+import { useState, useEffect } from 'react'
 import TitleBar from '../../components/TitleBar'
-import { useState } from 'react'
+import { withBasePath } from '../../utils/basePath'
 
 export default function LogsPage () {
-  // Static mock data for demonstration
-  const mockEntries = [
-    { timestamp: '2025-09-11T10:00:00.000Z', level: 'INFO', message: 'Safe Settings service started.' },
-    { timestamp: '2025-09-11T10:01:05.123Z', level: 'WARN', message: 'Config file missing, using defaults.' },
-    { timestamp: '2025-09-11T10:02:10.456Z', level: 'ERROR', message: 'Failed to sync settings: network error.' },
-    { timestamp: '2025-09-11T10:03:00.789Z', level: 'DEBUG', message: 'Polling GitHub API for updates.' },
-    { timestamp: '2025-09-11T10:04:15.000Z', level: 'INFO', message: 'Sync completed successfully.' },
-    { timestamp: '2025-09-11T10:05:00.000Z', level: 'INFO', message: 'SYNC: Organization settings updated.' },
-    { timestamp: '2025-09-11T10:06:00.000Z', level: 'ERROR', message: 'SYNC: Failed to update organization settings.' }
-  ]
+  const [entries, setEntries] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
 
   const logLevels = ['INFO', 'WARN', 'DEBUG', 'ERROR']
   const [selectedLevels, setSelectedLevels] = useState(new Set(logLevels))
   const [search, setSearch] = useState('')
+  const [syncOnly, setSyncOnly] = useState(false)
+
+  useEffect(() => {
+    async function fetchLogs() {
+      try {
+        setLoading(true)
+        const response = await fetch(withBasePath('/api/safe-settings/hub/log?lines=100'))
+        if (!response.ok) throw new Error('Failed to fetch logs')
+        const data = await response.json()
+        setEntries(data.entries || [])
+        setError(null)
+      } catch (err) {
+        setError(err.message)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchLogs()
+  }, [])
 
   const toggleLevel = (lvl) => {
     const next = new Set(selectedLevels)
@@ -25,10 +38,18 @@ export default function LogsPage () {
     setSelectedLevels(next)
   }
 
-  const filtered = mockEntries.filter(e =>
-    selectedLevels.has(e.level.toUpperCase()) &&
-    (search.trim() === '' || e.message.toLowerCase().includes(search.trim().toLowerCase()))
-  )
+  const filtered = entries.filter(e => {
+    // Filter by log level
+    if (!selectedLevels.has(e.level.toUpperCase())) return false
+    
+    // Filter by search term
+    if (search.trim() !== '' && !e.message.toLowerCase().includes(search.trim().toLowerCase())) return false
+    
+    // Filter by sync-only if enabled
+    if (syncOnly && !e.message.toLowerCase().includes('sync')) return false
+    
+    return true
+  })
 
   return (
     <>
@@ -37,8 +58,10 @@ export default function LogsPage () {
         <div className="col-12 mb-4">
           <div className="card shadow-sm">
             <div className="card-body">
-              <h4 className="card-title mb-2">Safe Settings Log</h4>
-              <p className="card-text text-muted">View recent log entries for Safe Settings operations and syncs.</p>
+              <h4 className="card-title mb-2">Safe Settings Hub-Sync Log</h4>
+              <p className="card-text text-muted">Last 100 entries from <code>hubSyncHandler.log</code></p>
+              {loading && <div className="text-muted">Loading logs...</div>}
+              {error && <div className="alert alert-danger">Error: {error}</div>}
             </div>
           </div>
         </div>
@@ -56,6 +79,19 @@ export default function LogsPage () {
                     </label>
                   ))}
                 </div>
+              </div>
+              <div className="mb-3">
+                <label className="form-check">
+                  <input 
+                    className="form-check-input" 
+                    type="checkbox" 
+                    checked={syncOnly} 
+                    onChange={(e) => setSyncOnly(e.target.checked)} 
+                  />
+                  <span className="form-check-label">
+                    <strong>🔄 Show Sync Logs Only</strong>
+                  </span>
+                </label>
               </div>
               <div className="mt-3">
                 <strong>Search Message:</strong>

@@ -848,11 +848,11 @@
 2026-06-01T18:26:42.906Z [INFO] Orgs updated in PR #53: jefeish-migration-test
 2026-06-01T18:26:42.906Z [DEBUG] Detected changes in the organizations folder. Routing to syncHubOrgUpdate(...).
 2026-06-01T18:26:42.907Z [INFO] Syncing safe settings for organization: jefeish-migration-test
-2026-06-01T18:26:42.907Z [INFO] DEBUG: sourceBase='.github/safe-settings/organizations'
-2026-06-01T18:26:42.907Z [INFO] DEBUG: env.CONFIG_PATH='.github', env.SAFE_SETTINGS_HUB_PATH='safe-settings'
-2026-06-01T18:26:43.380Z [INFO] DEBUG: PR #53 contains 1 changed file(s)
-2026-06-01T18:26:43.380Z [INFO] DEBUG: files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
-2026-06-01T18:26:43.380Z [INFO] DEBUG: first file object = {
+2026-06-01T18:26:42.907Z [DEBUG]  sourceBase='.github/safe-settings/organizations'
+2026-06-01T18:26:42.907Z [DEBUG]  env.CONFIG_PATH='.github', env.SAFE_SETTINGS_HUB_PATH='safe-settings'
+2026-06-01T18:26:43.380Z [DEBUG]  PR #53 contains 1 changed file(s)
+2026-06-01T18:26:43.380Z [DEBUG]  files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
+2026-06-01T18:26:43.380Z [DEBUG]  first file object = {
   "sha": "6928a64c36d64aeb96da968a8d250dfe08315435",
   "filename": ".github/safe-settings/organizations/jefeish-migration-test/settings.yml",
   "status": "modified",
@@ -864,12 +864,12 @@
   "contents_url": "https://api.github.com/repos/jefeish-training/safe-settings-config-master/contents/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml?ref=c01de93ada8652a04aa58af10f5de44ebf4b8f84",
   "patch": "@@ -400,3 +400,4 @@ rulesets:\n \n # --- test 1\n # --- test 2\n+# --- test 3"
 }
-2026-06-01T18:26:43.380Z [INFO] DEBUG: file[0] keys = sha, filename, status, additions, deletions, changes, blob_url, raw_url, contents_url, patch
-2026-06-01T18:26:43.381Z [INFO] DEBUG: files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
-2026-06-01T18:26:43.380Z [INFO] DEBUG: FILE[0] filename=".github/safe-settings/organizations/jefeish-migration-test/settings.yml" length=71
-2026-06-01T18:26:43.380Z [INFO] DEBUG: FILE[0] raw={"sha":"6928a64c36d64aeb96da968a8d250dfe08315435","filename":".github/safe-settings/organizations/jefeish-migration-test/settings.yml","status":"modified","additions":1,"deletions":0,"changes":1,"blob_url":"https://github.com/jefeish-training/safe-settings-config-master/blob/c01de93ada8652a04aa58af10f5de44ebf4b8f84/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","raw_url":"https://github.com/jefeish-training/safe-settings-config-master/raw/c01de93ada8652a04aa58af10f5de44ebf4b8f84/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","contents_url":"https://api.github.com/repos/jefeish-training/safe-settings-config-master/contents/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml?ref=c01de93ada8652a04aa58af10f5de44ebf4b8f84","patch":"@@ -400,3 +400,4 @@ rulesets:\n \n # --- test 1\n # --- test 2\n+# --- test 3"}
-2026-06-01T18:26:43.381Z [INFO] DEBUG: Found 1 changed file(s) relevant to org jefeish-migration-test
-2026-06-01T18:26:43.381Z [INFO] DEBUG: Path .github/safe-settings/organizations/jefeish-migration-test
+2026-06-01T18:26:43.380Z [DEBUG]  file[0] keys = sha, filename, status, additions, deletions, changes, blob_url, raw_url, contents_url, patch
+2026-06-01T18:26:43.381Z [DEBUG]  files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
+2026-06-01T18:26:43.380Z [DEBUG]  FILE[0] filename=".github/safe-settings/organizations/jefeish-migration-test/settings.yml" length=71
+2026-06-01T18:26:43.380Z [DEBUG]  FILE[0] raw={"sha":"6928a64c36d64aeb96da968a8d250dfe08315435","filename":".github/safe-settings/organizations/jefeish-migration-test/settings.yml","status":"modified","additions":1,"deletions":0,"changes":1,"blob_url":"https://github.com/jefeish-training/safe-settings-config-master/blob/c01de93ada8652a04aa58af10f5de44ebf4b8f84/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","raw_url":"https://github.com/jefeish-training/safe-settings-config-master/raw/c01de93ada8652a04aa58af10f5de44ebf4b8f84/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","contents_url":"https://api.github.com/repos/jefeish-training/safe-settings-config-master/contents/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml?ref=c01de93ada8652a04aa58af10f5de44ebf4b8f84","patch":"@@ -400,3 +400,4 @@ rulesets:\n \n # --- test 1\n # --- test 2\n+# --- test 3"}
+2026-06-01T18:26:43.381Z [DEBUG]  Found 1 changed file(s) relevant to org jefeish-migration-test
+2026-06-01T18:26:43.381Z [DEBUG]  Path .github/safe-settings/organizations/jefeish-migration-test
 2026-06-01T18:26:43.691Z [INFO] Syncing from jefeish-training/safe-settings-config-master PR #53 to jefeish-migration-test/safe-settings-config@main under .github (directPush=true)
 2026-06-01T18:27:03.334Z [ERROR] Failed to sync file .github/settings.yml: Could not update file: Changes must be made through a pull request. - https://docs.github.com/articles/about-protected-branches
 2026-06-01T18:27:03.334Z [ERROR] syncSafeSettingConfig error for org jefeish-migration-test: Could not update file: Changes must be made through a pull request. - https://docs.github.com/articles/about-protected-branches
@@ -912,14 +912,14 @@
 2026-06-01T18:31:10.277Z [INFO] Pull request closed on Safe-Settings Hub: (jefeish-training/safe-settings-config-master)
 2026-06-01T18:31:10.724Z [DEBUG] Detected changes in the organizations folder. Routing to syncHubOrgUpdate(...).
 2026-06-01T18:31:10.725Z [INFO] Organization: jefeish-migration-test, Destination Repo: safe-settings-config, Destination Folder: .github
-2026-06-01T18:31:10.725Z [INFO] DEBUG: sourceBase='.github/safe-settings/organizations'
+2026-06-01T18:31:10.725Z [DEBUG]  sourceBase='.github/safe-settings/organizations'
 2026-06-01T18:31:10.725Z [INFO] Syncing safe settings for organization: jefeish-migration-test
 2026-06-01T18:31:10.724Z [INFO] Files changed in PR #54: .github/safe-settings/organizations/jefeish-migration-test/settings.yml
 2026-06-01T18:31:10.724Z [INFO] Orgs updated in PR #54: jefeish-migration-test
-2026-06-01T18:31:10.725Z [INFO] DEBUG: env.CONFIG_PATH='.github', env.SAFE_SETTINGS_HUB_PATH='safe-settings'
-2026-06-01T18:31:11.118Z [INFO] DEBUG: PR #54 contains 1 changed file(s)
-2026-06-01T18:31:11.118Z [INFO] DEBUG: files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
-2026-06-01T18:31:11.118Z [INFO] DEBUG: first file object = {
+2026-06-01T18:31:10.725Z [DEBUG]  env.CONFIG_PATH='.github', env.SAFE_SETTINGS_HUB_PATH='safe-settings'
+2026-06-01T18:31:11.118Z [DEBUG]  PR #54 contains 1 changed file(s)
+2026-06-01T18:31:11.118Z [DEBUG]  files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
+2026-06-01T18:31:11.118Z [DEBUG]  first file object = {
   "sha": "4886a71655233cb557464ed47ce306079bbd170d",
   "filename": ".github/safe-settings/organizations/jefeish-migration-test/settings.yml",
   "status": "modified",
@@ -931,12 +931,12 @@
   "contents_url": "https://api.github.com/repos/jefeish-training/safe-settings-config-master/contents/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml?ref=daab9b95fb0626f8a0cbace114a6029e93c39636",
   "patch": "@@ -400,4 +400,3 @@ rulesets:\n \n # --- test 1\n # --- test 2\n-# --- test 3"
 }
-2026-06-01T18:31:11.118Z [INFO] DEBUG: file[0] keys = sha, filename, status, additions, deletions, changes, blob_url, raw_url, contents_url, patch
-2026-06-01T18:31:11.118Z [INFO] DEBUG: FILE[0] raw={"sha":"4886a71655233cb557464ed47ce306079bbd170d","filename":".github/safe-settings/organizations/jefeish-migration-test/settings.yml","status":"modified","additions":0,"deletions":1,"changes":1,"blob_url":"https://github.com/jefeish-training/safe-settings-config-master/blob/daab9b95fb0626f8a0cbace114a6029e93c39636/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","raw_url":"https://github.com/jefeish-training/safe-settings-config-master/raw/daab9b95fb0626f8a0cbace114a6029e93c39636/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","contents_url":"https://api.github.com/repos/jefeish-training/safe-settings-config-master/contents/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml?ref=daab9b95fb0626f8a0cbace114a6029e93c39636","patch":"@@ -400,4 +400,3 @@ rulesets:\n \n # --- test 1\n # --- test 2\n-# --- test 3"}
-2026-06-01T18:31:11.118Z [INFO] DEBUG: FILE[0] filename=".github/safe-settings/organizations/jefeish-migration-test/settings.yml" length=71
-2026-06-01T18:31:11.119Z [INFO] DEBUG: files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
-2026-06-01T18:31:11.119Z [INFO] DEBUG: Path .github/safe-settings/organizations/jefeish-migration-test
-2026-06-01T18:31:11.119Z [INFO] DEBUG: Found 1 changed file(s) relevant to org jefeish-migration-test
+2026-06-01T18:31:11.118Z [DEBUG]  file[0] keys = sha, filename, status, additions, deletions, changes, blob_url, raw_url, contents_url, patch
+2026-06-01T18:31:11.118Z [DEBUG]  FILE[0] raw={"sha":"4886a71655233cb557464ed47ce306079bbd170d","filename":".github/safe-settings/organizations/jefeish-migration-test/settings.yml","status":"modified","additions":0,"deletions":1,"changes":1,"blob_url":"https://github.com/jefeish-training/safe-settings-config-master/blob/daab9b95fb0626f8a0cbace114a6029e93c39636/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","raw_url":"https://github.com/jefeish-training/safe-settings-config-master/raw/daab9b95fb0626f8a0cbace114a6029e93c39636/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","contents_url":"https://api.github.com/repos/jefeish-training/safe-settings-config-master/contents/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml?ref=daab9b95fb0626f8a0cbace114a6029e93c39636","patch":"@@ -400,4 +400,3 @@ rulesets:\n \n # --- test 1\n # --- test 2\n-# --- test 3"}
+2026-06-01T18:31:11.118Z [DEBUG]  FILE[0] filename=".github/safe-settings/organizations/jefeish-migration-test/settings.yml" length=71
+2026-06-01T18:31:11.119Z [DEBUG]  files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
+2026-06-01T18:31:11.119Z [DEBUG]  Path .github/safe-settings/organizations/jefeish-migration-test
+2026-06-01T18:31:11.119Z [DEBUG]  Found 1 changed file(s) relevant to org jefeish-migration-test
 2026-06-01T18:31:11.364Z [INFO] Syncing from jefeish-training/safe-settings-config-master PR #54 to jefeish-migration-test/safe-settings-config@main under .github (directPush=true)
 2026-06-01T18:31:11.529Z [DEBUG] Is Admin repo event false
 2026-06-01T18:31:11.529Z [DEBUG] Not working on the Admin repo, returning...
@@ -951,15 +951,15 @@
 2026-06-01T18:35:27.673Z [INFO] Files changed in PR #55: .github/safe-settings/organizations/jefeish-migration-test/settings.yml
 2026-06-01T18:35:27.674Z [INFO] Syncing safe settings for organization: jefeish-migration-test
 2026-06-01T18:35:27.673Z [INFO] Orgs updated in PR #55: jefeish-migration-test
-2026-06-01T18:35:27.674Z [INFO] DEBUG: sourceBase='.github/safe-settings/organizations'
-2026-06-01T18:35:27.675Z [INFO] DEBUG: env.CONFIG_PATH='.github', env.SAFE_SETTINGS_HUB_PATH='safe-settings'
+2026-06-01T18:35:27.674Z [DEBUG]  sourceBase='.github/safe-settings/organizations'
+2026-06-01T18:35:27.675Z [DEBUG]  env.CONFIG_PATH='.github', env.SAFE_SETTINGS_HUB_PATH='safe-settings'
 2026-06-01T18:35:27.985Z [DEBUG] Not working on the Admin repo, returning...
 2026-06-01T18:35:27.985Z [DEBUG] Is Admin repo event false
-2026-06-01T18:35:28.092Z [INFO] DEBUG: files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
-2026-06-01T18:35:28.093Z [INFO] DEBUG: file[0] keys = sha, filename, status, additions, deletions, changes, blob_url, raw_url, contents_url, patch
-2026-06-01T18:35:28.093Z [INFO] DEBUG: FILE[0] raw={"sha":"785f2c88eba8195abb95a25febb1ff099a844516","filename":".github/safe-settings/organizations/jefeish-migration-test/settings.yml","status":"modified","additions":1,"deletions":1,"changes":2,"blob_url":"https://github.com/jefeish-training/safe-settings-config-master/blob/80e54cbb65a2ef75e9da0937604a1f8308f944e7/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","raw_url":"https://github.com/jefeish-training/safe-settings-config-master/raw/80e54cbb65a2ef75e9da0937604a1f8308f944e7/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","contents_url":"https://api.github.com/repos/jefeish-training/safe-settings-config-master/contents/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml?ref=80e54cbb65a2ef75e9da0937604a1f8308f944e7","patch":"@@ -399,4 +399,4 @@ rulesets:\n           pattern: \".*\\/.*\"\n \n # --- test 1\n-# --- test 2\n+# --- test 2 "}
-2026-06-01T18:35:28.092Z [INFO] DEBUG: PR #55 contains 1 changed file(s)
-2026-06-01T18:35:28.093Z [INFO] DEBUG: first file object = {
+2026-06-01T18:35:28.092Z [DEBUG]  files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
+2026-06-01T18:35:28.093Z [DEBUG]  file[0] keys = sha, filename, status, additions, deletions, changes, blob_url, raw_url, contents_url, patch
+2026-06-01T18:35:28.093Z [DEBUG]  FILE[0] raw={"sha":"785f2c88eba8195abb95a25febb1ff099a844516","filename":".github/safe-settings/organizations/jefeish-migration-test/settings.yml","status":"modified","additions":1,"deletions":1,"changes":2,"blob_url":"https://github.com/jefeish-training/safe-settings-config-master/blob/80e54cbb65a2ef75e9da0937604a1f8308f944e7/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","raw_url":"https://github.com/jefeish-training/safe-settings-config-master/raw/80e54cbb65a2ef75e9da0937604a1f8308f944e7/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml","contents_url":"https://api.github.com/repos/jefeish-training/safe-settings-config-master/contents/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml?ref=80e54cbb65a2ef75e9da0937604a1f8308f944e7","patch":"@@ -399,4 +399,4 @@ rulesets:\n           pattern: \".*\\/.*\"\n \n # --- test 1\n-# --- test 2\n+# --- test 2 "}
+2026-06-01T18:35:28.092Z [DEBUG]  PR #55 contains 1 changed file(s)
+2026-06-01T18:35:28.093Z [DEBUG]  first file object = {
   "sha": "785f2c88eba8195abb95a25febb1ff099a844516",
   "filename": ".github/safe-settings/organizations/jefeish-migration-test/settings.yml",
   "status": "modified",
@@ -971,10 +971,10 @@
   "contents_url": "https://api.github.com/repos/jefeish-training/safe-settings-config-master/contents/.github%2Fsafe-settings%2Forganizations%2Fjefeish-migration-test%2Fsettings.yml?ref=80e54cbb65a2ef75e9da0937604a1f8308f944e7",
   "patch": "@@ -399,4 +399,4 @@ rulesets:\n           pattern: \".*\\/.*\"\n \n # --- test 1\n-# --- test 2\n+# --- test 2 "
 }
-2026-06-01T18:35:28.093Z [INFO] DEBUG: FILE[0] filename=".github/safe-settings/organizations/jefeish-migration-test/settings.yml" length=71
-2026-06-01T18:35:28.093Z [INFO] DEBUG: files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
-2026-06-01T18:35:28.093Z [INFO] DEBUG: Found 1 changed file(s) relevant to org jefeish-migration-test
-2026-06-01T18:35:28.093Z [INFO] DEBUG: Path .github/safe-settings/organizations/jefeish-migration-test
+2026-06-01T18:35:28.093Z [DEBUG]  FILE[0] filename=".github/safe-settings/organizations/jefeish-migration-test/settings.yml" length=71
+2026-06-01T18:35:28.093Z [DEBUG]  files=.github/safe-settings/organizations/jefeish-migration-test/settings.yml
+2026-06-01T18:35:28.093Z [DEBUG]  Found 1 changed file(s) relevant to org jefeish-migration-test
+2026-06-01T18:35:28.093Z [DEBUG]  Path .github/safe-settings/organizations/jefeish-migration-test
 2026-06-01T18:35:28.321Z [INFO] Syncing from jefeish-training/safe-settings-config-master PR #55 to jefeish-migration-test/safe-settings-config@main under .github (directPush=false)
 2026-06-01T18:35:30.051Z [INFO] Created branch safe-settings-sync/pr-55-jefeish-migration-test-1780338928321 in jefeish-migration-test/safe-settings-config
 2026-06-01T18:35:31.423Z [DEBUG] Not working on the default branch, returning...
