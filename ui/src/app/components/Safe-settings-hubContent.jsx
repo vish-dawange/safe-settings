@@ -1,7 +1,8 @@
 'use client';
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
-import { SearchIcon, FileIcon, FileDirectoryIcon, ChevronDownIcon, ChevronRightIcon } from '@primer/octicons-react';
+import { ChevronDownIcon, ChevronRightIcon, FileDirectoryIcon, FileIcon, SearchIcon } from '@primer/octicons-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useHydrated } from '../hooks/useHydrated';
+import { withBasePath } from '../utils/basePath';
 
 // Match the left index width and reuse for the search input
 const LEFT_COL_WIDTH = 320;
@@ -20,7 +21,7 @@ export default function SafeSettingsHubContent3b() {
   const fetchData = () => {
     if (!hydrated) return;
     setLoading(true); setError(null);
-    fetch('/api/safe-settings/hub/content?fetchContent=true')
+    fetch(withBasePath('/api/safe-settings/hub/content?fetchContent=true'))
       .then(r => {
         if (!r.ok) throw new Error(`Unable to retrieve safe-settings hub content (HTTP ${r.status})`);
         return r.json();

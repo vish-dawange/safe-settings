@@ -1,13 +1,14 @@
 "use client";
 
-import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
-  ChevronUpIcon,
-  ChevronDownIcon,
-  SearchIcon,
-  InfoIcon,
+    ChevronDownIcon,
+    ChevronUpIcon,
+    InfoIcon,
+    SearchIcon,
 } from "@primer/octicons-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useHydrated } from "../hooks/useHydrated";
+import { withBasePath } from "../utils/basePath";
 
 // Mock organizations used when /api/safe-settings/installation returns 404
 const MOCK_ORGS = [
@@ -58,7 +59,7 @@ const OrganizationsTable = ({ organizations: propOrganizations = [] }) => {
     let cancelled = false;
     setLoading(true);
 
-    fetch("/api/safe-settings/installation")
+    fetch(withBasePath("/api/safe-settings/installation"))
       .then((r) => {
         if (!r.ok) {
           throw new Error(
@@ -249,7 +250,7 @@ const OrganizationsTable = ({ organizations: propOrganizations = [] }) => {
     setRetrieveError(null);
     setRetrievingFiles(true);
     try {
-  const res = await fetch("/api/safe-settings/hub/import", {
+  const res = await fetch(withBasePath("/api/safe-settings/hub/import"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ orgs: orgNames }),

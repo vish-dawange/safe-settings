@@ -1,12 +1,13 @@
 'use client';
 import { useEffect, useRef } from "react";
 import useSWR from "swr";
+import { withBasePath } from "../utils/basePath";
 
 const fetcher = (...args) => fetch(...args).then(res => res.json());
 
 export default function HubOrgGraph({ width = 640, height = 320 }) {
   const vizRef = useRef(null);
-  const { data, error } = useSWR("/api/safe-settings/installation", fetcher);
+  const { data, error } = useSWR(withBasePath("/api/safe-settings/installation"), fetcher);
   const orgs = Array.isArray(data?.installations)
     ? data.installations.filter(i => i.type === "Organization")
     : [];

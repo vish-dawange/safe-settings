@@ -112,6 +112,12 @@ describe('GET /api/safe-settings/app/env', () => {
     // Should return 13 variables
     expect(res.body.count).toBe(13);
     expect(res.body.variables.length).toBe(13);
+    // Each variable should have key, value, and description
+    res.body.variables.forEach(v => {
+      expect(v).toHaveProperty('key');
+      expect(v).toHaveProperty('value');
+      expect(v).toHaveProperty('description');
+    });
   });
 });
 

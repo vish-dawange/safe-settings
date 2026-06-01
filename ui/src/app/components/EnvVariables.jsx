@@ -1,7 +1,8 @@
 'use client';
-import React, { useEffect, useState, useMemo } from 'react';
-import { SearchIcon, SyncIcon, EyeClosedIcon, EyeIcon, ShieldIcon, CopyIcon, ChevronUpIcon, ChevronDownIcon } from '@primer/octicons-react';
+import { ChevronDownIcon, ChevronUpIcon, CopyIcon, SearchIcon, ShieldIcon } from '@primer/octicons-react';
+import { useEffect, useMemo, useState } from 'react';
 import { useHydrated } from '../hooks/useHydrated';
+import { withBasePath } from '../utils/basePath';
 
 const SENSITIVE_REGEX = /(secret|token|key|password|private)/i;
 
@@ -19,7 +20,7 @@ export default function EnvVariables() {
   const fetchData = () => {
     if (!hydrated) return;
     setLoading(true); setError(null);
-    fetch(`/api/safe-settings/app/env${includeInfra ? '?includeInfra=true' : ''}`)
+    fetch(withBasePath(`/api/safe-settings/app/env${includeInfra ? '?includeInfra=true' : ''}`))
       .then(r => {
         if (!r.ok) {
           throw new Error(`Unable to retrieve environment variables (HTTP ${r.status}). Please try again later.`);
@@ -39,7 +40,11 @@ export default function EnvVariables() {
   const filtered = useMemo(() => {
     if (!search) return rows;
     const q = search.toLowerCase();
-    return rows.filter(r => r.key.toLowerCase().includes(q) || (r.value + '').toLowerCase().includes(q));
+    return rows.filter(r => 
+      r.key.toLowerCase().includes(q) || 
+      (r.value + '').toLowerCase().includes(q) ||
+      (r.description || '').toLowerCase().includes(q)
+    );
   }, [rows, search]);
 
   const sorted = useMemo(() => {
@@ -95,7 +100,7 @@ export default function EnvVariables() {
           <label className="form-label small theme-text-secondary">Search</label>
             <div className="input-group">
               <span className="input-group-text theme-bg-secondary theme-border border"><SearchIcon size={14} /></span>
-              <input className="form-control theme-bg-primary theme-text-primary theme-border border" placeholder="Filter by key or value" value={search} onChange={e => setSearch(e.target.value)} />
+              <input className="form-control theme-bg-primary theme-text-primary theme-border border" placeholder="Filter by key, value, or description" value={search} onChange={e => setSearch(e.target.value)} />
             </div>
         </div>
   {/* Removed options and buttons section for a cleaner environment page UI */}
@@ -110,8 +115,9 @@ export default function EnvVariables() {
           <table className="table table-sm table-hover align-middle mb-0 theme-bg-primary" style={{ background: 'var(--bg-primary)' }}>
             <thead className="small">
               <tr className="theme-bg-secondary">
-                <th role="button" onClick={() => cycleSort('key')} className="theme-text-primary user-select-none" style={{ width: '28%', cursor: 'pointer' }}>Key {renderSortIcon('key')}</th>
-                <th role="button" onClick={() => cycleSort('value')} className="theme-text-primary user-select-none" style={{ cursor: 'pointer' }}>Value {renderSortIcon('value')}</th>
+                <th role="button" onClick={() => cycleSort('key')} className="theme-text-primary user-select-none" style={{ width: '20%', cursor: 'pointer' }}>Key {renderSortIcon('key')}</th>
+                <th role="button" onClick={() => cycleSort('value')} className="theme-text-primary user-select-none" style={{ width: '30%', cursor: 'pointer' }}>Value {renderSortIcon('value')}</th>
+                <th role="button" onClick={() => cycleSort('description')} className="theme-text-primary user-select-none" style={{ cursor: 'pointer' }}>Description {renderSortIcon('description')}</th>
                 <th className="theme-text-primary text-center" style={{ width: '50px' }}></th>
                 <th className="theme-text-primary" style={{ width: '50px' }}></th>
               </tr>
@@ -122,9 +128,10 @@ export default function EnvVariables() {
                 return (
                   <tr key={r.key} className="theme-border-top" style={{ background: 'var(--bg-primary)' }}>
                     <td className="fw-semibold text-break"><code>{r.key}</code></td>
-                    <td className="text-break" style={{ maxWidth: 480 }}>
+                    <td className="text-break" style={{ maxWidth: 350 }}>
                       <code>{maskedValue(r.key, r.value)}</code>
                     </td>
+                    <td className="text-break theme-text-secondary">{r.description || 'NA'}</td>
                     <td className="text-center">{sensitive && <ShieldIcon size={14} className="text-warning" />}</td>
                     <td className="text-center">
                       <button className="btn btn-sm btn-link p-0" title="Copy value" onClick={() => copyToClipboard(r.value)}><CopyIcon size={14} /></button>
