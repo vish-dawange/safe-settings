@@ -10,6 +10,8 @@ One central **master admin repository** (the hub) serves as the authoritative so
 
 **Note:** When something changes in the 'Master' repo (the hub), only those changed files are copied to each affected ORG’s admin repo, so everything stays in sync.
 
+#### :warning: In order for `Safe-Settings Hub-Sync` to enforce Policy sync in the controlled ORGs/Repos, **Safe-Settings** needs to be given **Bypass authority** for any branch protection Ruleset that prevents 'direct pushes'.
+
 ## Sync Lifecycle (High Level)
 
 ```mermaid
@@ -19,6 +21,69 @@ A1(HUB Admin Repo) --> B(ORG Admin Repo)
 A1(HUB Admin Repo) --> C(ORG Admin Repo)
 A1(HUB Admin Repo) --> D(ORG Admin Repo)
 ```
+
+## Initial Setup
+
+Before getting started with the hub-sync configuration, you'll need to deploy and build the Safe Settings App, including the UI.
+
+### Deploy the Application
+
+To deploy the Safe Settings application to a hosting environment, choose one of the following deployment options:
+
+#### Option 1: Virtual Machine (VM)
+Deploy Safe Settings on a VM (AWS EC2, Azure VM, Google Compute Engine, etc.):
+
+1. Set up a VM with Node.js installed
+2. Clone the Safe Settings repository to the VM
+3. Copy your built UI files to the VM
+4. Configure environment variables (see [Environment Variables](#environment-variables--inputs-specific-to-the-hub-sync-feature))
+5. Start the application:
+   ```bash
+   npm start
+   ```
+
+ :warning: Follow the standard GitHub Probot App [deployment steps](https://probot.github.io/docs/deployment/)  
+
+#### Option 2: Container Deployment
+Deploy using Docker:
+
+1. Use the provided `Dockerfile` or `docker-compose.yml`
+2. Build and run the container:
+   ```bash
+   docker-compose up -d
+   ```
+
+#### Option 3: Serverless Deployment
+Deploy to AWS Lambda or similar serverless platforms using the provided `serverless.yml` configuration. See [AWS deployment documentation](../AWS-README.md) for details.
+
+#### Option 4: Kubernetes
+Deploy to a Kubernetes cluster using the provided Helm charts in the `helm/safe-settings/` directory.
+
+**Note:** Ensure your deployment environment has network access to GitHub APIs and can receive webhook events from GitHub.
+
+
+### Build the UI
+
+The Safe Settings dashboard includes a Next.js-based UI that must be compiled before deployment.
+
+1. Navigate to the UI directory:
+   ```bash
+   cd safe-settings/ui/
+   ```
+
+2. Install dependencies (if not already done):
+   ```bash
+   npm install
+   ```
+
+3. Build the Next.js application:
+   ```bash
+   npm run build
+   ```
+
+This creates an optimized production build of the dashboard UI that will be served by the Safe Settings application.
+
+---
 
 ## Gettings Started
 
