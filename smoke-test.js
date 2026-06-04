@@ -78,7 +78,37 @@ const WEBHOOK_SETTLE_MS = 15000
 const GH_TOKEN = process.env.GH_TOKEN || ''
 
 // Interactive mode: pause after each phase for manual validation
-const INTERACTIVE = process.argv.includes('--interactive')
+// Accepts --interactive flag or bare positional "interactive" word.
+const INTERACTIVE = process.argv.includes('--interactive') || process.argv.slice(2).includes('interactive')
+
+// Phase filter: supports single, comma-separated, or range values.
+//   --phase 3          → only phase 3
+//   --phase 1,2,3      → phases 1, 2, and 3
+//   --phase 1-3        → phases 1 through 3
+//   npm run smoke-test:phase -- 1-3 interactive
+const PHASE_ARG_IDX = process.argv.indexOf('--phase')
+const _parsePhaseSet = (raw) => {
+  if (!raw) return null
+  const nums = new Set()
+  for (const part of raw.split(',')) {
+    const range = part.match(/^(\d+)-(\d+)$/)
+    if (range) {
+      const lo = parseInt(range[1], 10)
+      const hi = parseInt(range[2], 10)
+      for (let i = lo; i <= hi; i++) nums.add(i)
+    } else if (/^\d+$/.test(part.trim())) {
+      nums.add(parseInt(part.trim(), 10))
+    }
+  }
+  return nums.size > 0 ? nums : null
+}
+const ONLY_PHASES = PHASE_ARG_IDX !== -1
+  ? _parsePhaseSet(process.argv[PHASE_ARG_IDX + 1])
+  : (() => {
+      // Accept bare positional phase spec (e.g. "3" or "1-3" or "1,2,3")
+      const positional = process.argv.slice(2).find(a => !a.startsWith('--') && /^[\d,\-]+$/.test(a) && !/^-\d/.test(a))
+      return positional !== undefined ? _parsePhaseSet(positional) : null
+    })()
 
 class InteractiveExit extends Error {
   constructor (action) {
@@ -813,6 +843,30 @@ custom_properties:
 disable_plugins:
   - plugin: custom_properties
     target: self
+`
+
+// Phase 13: Variables plugin
+const REPO_YML_VARIABLES = `repository:
+  name: test
+  auto_init: true
+  force_create: true
+  private: true
+
+variables:
+  - name: SMOKE_VAR_ONE
+    value: hello
+  - name: SMOKE_VAR_TWO
+    value: "42"
+`
+
+const REPO_YML_VARIABLES_UPDATED = `repository:
+  name: test
+
+variables:
+  - name: SMOKE_VAR_ONE
+    value: hello-updated
+  - name: SMOKE_VAR_TWO
+    value: "42"
 `
 
 // ─── Test Phases ─────────────────────────────────────────────────────────────
@@ -1625,6 +1679,99 @@ async function phase12CustomProperties () {
   }
 }
 
+async function phase13Variables () {
+  logPhase('Phase 13: Variables plugin — create, NOP check, update, verify')
+  const defaultBranch = await getDefaultBranch()
+
+  // 13a: Create variables via repo settings file
+  {
+    const branch = 'smoke-test-phase13a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_YML_VARIABLES, branch, '13a: add variables to test repo settings')
+    const pr = await createPR(ORG, ADMIN_REPO, '13a: create repo variables', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '13a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `13a: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    log('Verifying variables were created on test repo...')
+    const varsOk = await poll(async () => {
+      try {
+        const { data } = await octokit.request('GET /repos/{owner}/{repo}/actions/variables', { owner: ORG, repo: 'test' })
+        const vars = data.variables || []
+        const v1 = vars.find(v => v.name === 'SMOKE_VAR_ONE' && v.value === 'hello')
+        const v2 = vars.find(v => v.name === 'SMOKE_VAR_TWO' && v.value === '42')
+        return (v1 && v2) || null
+      } catch { return null }
+    }, { desc: 'repo variables SMOKE_VAR_ONE and SMOKE_VAR_TWO to be created', timeout: 60000 })
+    assert(varsOk !== null, '13a: SMOKE_VAR_ONE and SMOKE_VAR_TWO created on test repo')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 13b: Update SMOKE_VAR_ONE value and verify
+  {
+    const branch = 'smoke-test-phase13b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_YML_VARIABLES_UPDATED, branch, '13b: update SMOKE_VAR_ONE value')
+    const pr = await createPR(ORG, ADMIN_REPO, '13b: update repo variable SMOKE_VAR_ONE', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '13b: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `13b: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    log('Verifying SMOKE_VAR_ONE was updated...')
+    const updateOk = await poll(async () => {
+      try {
+        const { data } = await octokit.request('GET /repos/{owner}/{repo}/actions/variables', { owner: ORG, repo: 'test' })
+        const v = (data.variables || []).find(v => v.name === 'SMOKE_VAR_ONE' && v.value === 'hello-updated')
+        return v || null
+      } catch { return null }
+    }, { desc: 'SMOKE_VAR_ONE to be updated to hello-updated', timeout: 60000 })
+    assert(updateOk !== null, '13b: SMOKE_VAR_ONE updated to "hello-updated"')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 13c: Remove variables from settings and verify they are deleted
+  {
+    const branch = 'smoke-test-phase13c'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    const REPO_YML_NO_VARS = `repository:\n  name: test\n`
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_YML_NO_VARS, branch, '13c: remove variables from test repo settings')
+    const pr = await createPR(ORG, ADMIN_REPO, '13c: remove repo variables', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '13c: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `13c: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    log('Verifying variables were removed from test repo...')
+    const removeOk = await poll(async () => {
+      try {
+        const { data } = await octokit.request('GET /repos/{owner}/{repo}/actions/variables', { owner: ORG, repo: 'test' })
+        const vars = data.variables || []
+        const noneLeft = !vars.find(v => v.name === 'SMOKE_VAR_ONE' || v.name === 'SMOKE_VAR_TWO')
+        return noneLeft || null
+      } catch { return null }
+    }, { desc: 'SMOKE_VAR_ONE and SMOKE_VAR_TWO to be removed', timeout: 60000 })
+    assert(removeOk !== null, '13c: SMOKE_VAR_ONE and SMOKE_VAR_TWO removed from test repo')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
 async function teardown () {
   logPhase('Phase 9: Teardown')
 
@@ -1688,10 +1835,11 @@ async function main () {
 `)
 
   if (INTERACTIVE) log('\x1b[33m[interactive] Mode enabled — will pause after each phase.\x1b[0m')
+  if (ONLY_PHASES !== null) log(`\x1b[33m[phase filter] Running setup + phase(s) [${[...ONLY_PHASES].join(', ')}] + teardown only.\x1b[0m`)
 
   let doTeardown = true
   try {
-    const phases = [
+    const allPhases = [
       ['Phase 0: Setup', setup],
       ['Phase 1: Create test repo', phase1CreateRepo],
       ['Phase 2: Drift remediation - Team removal', phase2DriftTeam],
@@ -1704,8 +1852,24 @@ async function main () {
       ['Phase 8: Org-level settings', phase8OrgSettings],
       ['Phase 10: disable_plugins', phase10DisablePlugins],
       ['Phase 11: additive_plugins', phase11AdditivePlugins],
-      ['Phase 12: custom_properties', phase12CustomProperties]
+      ['Phase 12: custom_properties', phase12CustomProperties],
+      ['Phase 13: variables', phase13Variables]
     ]
+
+    // When --phase is given, only run setup (phase 0) + the requested phase(s).
+    // Phase labels start with "Phase N:" so we match on that prefix.
+    const phases = ONLY_PHASES !== null
+      ? allPhases.filter(([label]) => {
+          if (label.startsWith('Phase 0:')) return true
+          const m = label.match(/^Phase (\d+)[:\s]/)
+          return m !== null && ONLY_PHASES.has(parseInt(m[1], 10))
+        })
+      : allPhases
+
+    if (ONLY_PHASES !== null && phases.length < 2) {
+      const valid = allPhases.map(([label]) => label.replace(/^Phase (\S+):.*/, '$1')).filter(n => n !== '0').join(', ')
+      throw new Error(`No phases matching [${[...ONLY_PHASES].join(', ')}] found. Valid phase numbers: ${valid}`)
+    }
     for (const [label, fn] of phases) {
       const action = await runPhase(label, fn)
       if (action === 'abort') { doTeardown = false; break }

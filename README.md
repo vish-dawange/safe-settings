@@ -750,14 +750,37 @@ Add the following to your `.env` file:
 ### Running
 
 ```bash
+# Run all phases
 npm run smoke-test
 # or
 node smoke-test.js
+
+# Interactive mode — pause after each phase for manual validation
+npm run smoke-test:interactive
+# or
+node smoke-test.js --interactive
+
+# Run a single phase (with setup + teardown)
+npm run smoke-test:phase -- 3
+# or
+node smoke-test.js --phase 3
+
+# Run a range of phases
+npm run smoke-test:phase -- 1-3
+node smoke-test.js --phase 1-3
+
+# Run specific comma-separated phases
+npm run smoke-test:phase -- 1,3,5
+node smoke-test.js --phase 1,3,5
+
+# Mix range + interactive
+npm run smoke-test:phase -- 1-3 interactive
+node smoke-test.js --phase 1-3 --interactive
 ```
 
 ### What it tests
 
-The smoke test runs 9 phases:
+The smoke test runs the following phases:
 
 | Phase | Description |
 |---|---|
@@ -769,7 +792,12 @@ The smoke test runs 9 phases:
 | **Phase 5** | Creates a suborg config and verifies org-scoped rulesets are applied to matching repos |
 | **Phase 6** | Archives `demo-repo-service1` and verifies the repo is archived |
 | **Phase 7** | Creates `demo-repo-service2` and verifies suborg rulesets are inherited |
+| **Phase 7b** | Tests external group team sync |
 | **Phase 8** | Creates org-level settings (custom repository roles + org rulesets) and verifies they are applied |
+| **Phase 10** | Validates `disable_plugins` — ensures disabled plugins are skipped |
+| **Phase 11** | Validates `additive_plugins` — verifies additive-mode plugin behaviour |
+| **Phase 12** | Tests `custom_properties` plugin |
+| **Phase 13** | Tests the `variables` plugin (create, update, remove variables) |
 | **Teardown** | Shuts down safe-settings, deletes test repos, teams, custom roles, and rulesets |
 
 ### Output
