@@ -861,12 +861,24 @@ variables:
 
 const REPO_YML_VARIABLES_UPDATED = `repository:
   name: test
+  auto_init: true
+  force_create: true
+  private: true
 
 variables:
   - name: SMOKE_VAR_ONE
     value: hello-updated
   - name: SMOKE_VAR_TWO
     value: "42"
+`
+
+const REPO_YML_NO_VARS = `repository:
+  name: test
+  auto_init: true
+  force_create: true
+  private: true
+
+variables: []
 `
 
 // ─── Test Phases ─────────────────────────────────────────────────────────────
@@ -1746,7 +1758,6 @@ async function phase13Variables () {
     const branch = 'smoke-test-phase13c'
     await deleteBranch(ORG, ADMIN_REPO, branch)
     await createBranch(ORG, ADMIN_REPO, branch)
-    const REPO_YML_NO_VARS = `repository:\n  name: test\n`
     await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_YML_NO_VARS, branch, '13c: remove variables from test repo settings')
     const pr = await createPR(ORG, ADMIN_REPO, '13c: remove repo variables', branch, defaultBranch)
     log('Waiting for NOP check run...')
