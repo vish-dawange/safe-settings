@@ -13,7 +13,7 @@
 
    > It is possible specify a custom repo instead of the `admin` repo with `ADMIN_REPO`. See [Environment variables](#environment-variables) for more details.
 
-1. The **settings** in the **default** branch are applied. If the settings are changed on a non-default branch and a PR is created to merge the changes, the app runs in a `dry-run` mode to evaluate and validate the changes. Checks pass or fail based on the `dry-run` results.
+1. The **settings** in the **default** branch are applied. If the settings are changed on a non-default branch and a PR is created to merge the changes, the app runs in a `dry-run` mode to evaluate and validate the changes. Checks pass or fail based on the `dry-run` results. The dry-run compares the PR's config against the **base branch** config, so the check run and PR comment report only the changes the PR itself introduces (see [Dry-run PR comment](#dry-run-pr-comment)).
 
 1. In `safe-settings` the settings can have 2 types of targets:
    1. `org` - These settings are applied to the organization. `Org`-targeted settings are defined in `.github/settings.yml`. Currently, only `rulesets` are supported as `org`-targeted settings.
@@ -168,7 +168,7 @@ The App listens to the following webhook events:
 
 - **repository.renamed**: If a repository is renamed, the default behavior is safe-settings will ignore this (for backward-compatibility). If `BLOCK_REPO_RENAME_BY_HUMAN` env variable is set to true, `safe-settings` will revert the repo to the previous name unless it is renamed using a `bot`. If it is renamed using a `bot`, it will try to copy the existing `<old-repo>.yml` to `<new-repo>.yml` so that the repo config yml stays consistent. If a <new-repo.yml> file already exists, it doesn't create a new one.
 
-- **pull_request.opened**, **pull_request.reopened**, **check_suite.requested**: If the settings are changed, but it is not in the `default` branch, and there is an existing PR, the code will validate the settings changes by running safe-settings in `nop` mode and update the PR with the `dry-run` status.
+- **pull_request.opened**, **pull_request.reopened**, **check_suite.requested**: If the settings are changed, but it is not in the `default` branch, and there is an existing PR, the code will validate the settings changes by running safe-settings in `nop` mode and update the PR with the `dry-run` status. The run loads the base-branch config and filters the results so only the changes the PR introduces are reported (see [Dry-run PR comment](#dry-run-pr-comment)).
 
 - **repository_ruleset**: If the `ruleset` settings are modified in the UI manually, `safe-settings` will `sync` the settings to prevent any unauthorized changes.
 
@@ -177,6 +177,19 @@ The App listens to the following webhook events:
 - **member**', __team.added_to_repository__, __team.removed_from_repository__, __team.edited__: `safe-settings` will `sync` the settings to prevent any unauthorized changes.
 
 - __custom_property_values__: If new repository properties are set for a repository, `safe-settings` will run to so that if a sub-org config is defined by that property, it will be applied for the repo
+
+### Dry-run PR comment
+
+When a config change is proposed in a PR (a non-default branch), `safe-settings` runs in `nop` (no-operation) `dry-run` mode and posts a comment summarizing what *would* change if the PR were merged. The results are filtered against the **base branch** config, so the comment reports only the changes the PR introduces — not the full diff against live GitHub settings.
+
+The comment contains:
+
+- A header with the run timestamp, the **number of repos considered**, and the **number of repos affected**.
+- **Breakdown of changes** — a collapsible section, grouped by plugin/repo, showing field-level diffs. Each entry is marked as an addition, modification, or deletion, with the before/after values for modified fields. When there are no changes, it shows `No changes to apply.`
+- **Breakdown of errors** — a collapsible section listing any errors by repo, or `None` when there are none. The check run is marked as failed when errors are present.
+- **Informational messages (disabled plugins)** — a collapsible section listing plugins that were skipped via [`disable_plugins`](#disabling-plugins-disable_plugins), so reviewers can see which settings were intentionally not applied.
+
+For very large diffs the comment is split across multiple comments, and the check-run summary is truncated with a notice when it exceeds the size limit.
 
 ### Suborg re-evaluation after repo-level changes
 
