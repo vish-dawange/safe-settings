@@ -22,6 +22,7 @@ default_events:
   - pull_request
   - push
   - repository
+  - repository_dispatch
   - repository_ruleset
   - team
 

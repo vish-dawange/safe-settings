@@ -178,6 +178,8 @@ The App listens to the following webhook events:
 
 - __custom_property_values__: If new repository properties are set for a repository, `safe-settings` will run to so that if a sub-org config is defined by that property, it will be applied for the repo
 
+- **repository_dispatch** (`event_type: safe-settings-generate`): Triggers the **settings generator**, which reads the current configuration of a repo/org/suborg and opens a PR against the `admin` repo with the generated YAML. See [Generating settings from existing configuration](#generating-settings-from-existing-configuration).
+
 ### Dry-run PR comment
 
 When a config change is proposed in a PR (a non-default branch), `safe-settings` runs in `nop` (no-operation) `dry-run` mode and posts a comment summarizing what *would* change if the PR were merged. The results are filtered against the **base branch** config, so the comment reports only the changes the PR introduces — not the full diff against live GitHub settings.
@@ -822,6 +824,120 @@ The script uses colored terminal output with pass (✅) / fail (❌) indicators 
   Results: 45 passed, 0 failed
 ══════════════════════════════════════
 ```
+
+
+## Generating settings from existing configuration
+
+Safe-settings normally works "forward": you declare settings in YAML and it applies them to GitHub. The **settings generator** does the reverse — it reads the *current* state of a repo, an org, or a collection of repos (a suborg) and produces the corresponding safe-settings YAML (`repos/<name>.yml`, `settings.yml`, or `suborgs/<name>.yml`). This is useful for onboarding existing repositories/orgs onto safe-settings without hand-authoring config.
+
+It can be invoked two ways:
+
+- **Standalone CLI** (`generate-settings.js`) — writes the generated file to your local filesystem.
+- **App trigger** via a `repository_dispatch` event — the running app generates the file and opens a **pull request** against the admin repo.
+
+### Source types
+
+| `source_type` | `source_value` | What is extracted | Output file |
+|---|---|---|---|
+| `repo` | repository name | All repo-level plugins (repository, labels, collaborators, teams, milestones, branches, autolinks, custom_properties, variables, environments, repo rulesets) | `repos/<repo>.yml` |
+| `org` | org login | Org-level rulesets and custom repository roles only | `settings.yml` |
+| `custom-property` | `name=value` (e.g. `Team=backend`) | Repo-level settings **common to all repos** carrying that custom property value (intersection) | `suborgs/<name>_<value>.yml` |
+
+> **Note on suborgs:** for `custom-property`, the generator discovers every repo with the given custom property value, extracts each repo's config, and keeps only the settings that are **identical across all of them**. A `suborgproperties` selector is prepended automatically.
+
+### Overwrite behavior
+
+By default (`overwrite=false`) the generator will **not** replace an existing file. If the target already exists it writes a `<name>.sample.yml` file next to it instead. Set `overwrite=true` to replace the file.
+
+### Standalone invocation
+
+The CLI loads variables from a `.env` file in the project root (`APP_ID`, `PRIVATE_KEY`, and optionally `GH_ORG`/`OWNER`). Options can be passed as flags or environment variables.
+
+```bash
+# Generate repos/my-repo.yml from a single repository
+node generate-settings.js \
+  --source-type repo \
+  --source-value my-repo \
+  --owner my-org \
+  --output-dir ./out
+
+# Generate settings.yml from org-level rulesets + custom repository roles
+node generate-settings.js --source-type org --source-value my-org --output-dir ./out
+
+# Generate suborgs/Team_backend.yml from all repos with the custom property Team=backend
+node generate-settings.js \
+  --source-type custom-property \
+  --source-value "Team=backend" \
+  --owner my-org \
+  --output-dir ./out
+
+# Overwrite an existing file instead of writing a .sample.yml
+node generate-settings.js --source-type repo --source-value my-repo --owner my-org --overwrite
+
+# Using environment variables instead of flags
+SOURCE_TYPE=repo SOURCE_VALUE=my-repo OWNER=my-org OUTPUT_DIR=./out node generate-settings.js
+```
+
+| Flag | Env var | Description | Default |
+|---|---|---|---|
+| `--source-type` | `SOURCE_TYPE` | `repo`, `org`, or `custom-property` | (required) |
+| `--source-value` | `SOURCE_VALUE` | repo name / org login / `name=value` | (required) |
+| `--property-name` | `SOURCE_PROPERTY_NAME` | Custom property name (alternative to encoding it in `--source-value`) | — |
+| `--owner` | `OWNER` / `GITHUB_ORG` / `GH_ORG` | Org login (selects the matching App installation) | first installation |
+| `--output-dir` | `OUTPUT_DIR` | Directory to write generated files into | `.` |
+| `--overwrite` | `OVERWRITE=true` | Replace existing files instead of writing `.sample.yml` | `false` |
+
+### App invocation (`repository_dispatch`)
+
+When the app is running, trigger generation by sending a `repository_dispatch` event (with `event_type: safe-settings-generate`) to the **admin repo**. The app generates the file and opens a PR against the admin repo's default branch.
+
+```bash
+# Generate a repo config and open a PR
+gh api --method POST \
+  /repos/my-org/admin/dispatches \
+  -f event_type=safe-settings-generate \
+  -F 'client_payload[source_type]=repo' \
+  -F 'client_payload[source_value]=my-repo' \
+  -F 'client_payload[overwrite]=false'
+
+# Generate org-level settings.yml and open a PR
+gh api --method POST \
+  /repos/my-org/admin/dispatches \
+  -f event_type=safe-settings-generate \
+  -F 'client_payload[source_type]=org' \
+  -F 'client_payload[source_value]=my-org'
+
+# Generate a suborg config from a custom property
+gh api --method POST \
+  /repos/my-org/admin/dispatches \
+  -f event_type=safe-settings-generate \
+  -F 'client_payload[source_type]=custom-property' \
+  -F 'client_payload[source_value]=Team=backend' \
+  -F 'client_payload[overwrite]=false'
+```
+
+The `client_payload` fields are:
+
+| Field | Description | Required |
+|---|---|---|
+| `source_type` | `repo`, `org`, or `custom-property` | Yes |
+| `source_value` | repo name / org login / `name=value` | Yes |
+| `property_name` | Custom property name (alternative to encoding it in `source_value`) | No |
+| `overwrite` | `true` to replace an existing file; otherwise a `.sample.yml` is created | No (default `false`) |
+
+> **Tip:** Always review the generated PR before merging. Running safe-settings in NOP mode against the generated config should report no unexpected diffs.
+
+#### Generated changes always go through a pull request
+
+The app **never** commits generated configuration directly to the admin repo's default branch. Every `repository_dispatch` invocation produces a pull request that must be reviewed and merged before it takes effect. Concretely, for each request the app:
+
+1. Creates a **new branch** off the admin repo's default branch (`safe-settings-generate/<source_type>-<source_value>-<timestamp>`).
+2. Commits the generated YAML **to that branch only**.
+3. Opens a **pull request** from that branch against the default branch.
+
+This means it is safe to give developers write access to the admin repo so they can trigger generation: a `repository_dispatch` event can only create a branch and open a PR — it cannot change the live configuration on its own. The generated config does not reach the path safe-settings acts on until the PR is merged, so all changes are subject to your normal review process and any branch protection / required-reviews rules configured on the admin repo's default branch.
+
+To enforce review, protect the admin repo's default branch (for example, require pull request reviews and disallow direct pushes). Because the generator only ever writes to a feature branch and opens a PR, those rules apply to every generated change.
 
 
 ## License
