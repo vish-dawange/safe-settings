@@ -625,6 +625,20 @@ repository:
       expect(settings.reevaluationDepth.get('r1')).toBe(1)
     })
 
+    it('recurses once when a previously matched suborg source disappears', async () => {
+      const settings = createSettings({})
+      settings.reevaluateOnChange = true
+      settings.subOrgConfigs = {}
+      settings.repoConfigs = { 'r1.yml': { custom_properties: [{ property_name: 'team', value: 'other' }] } }
+      jest.spyOn(settings, 'reloadSubOrgConfigs').mockResolvedValue()
+      jest.spyOn(settings, 'getRepoConfigs').mockResolvedValue({ 'r1.yml': { custom_properties: [{ property_name: 'team', value: 'other' }] } })
+      const updateSpy = jest.spyOn(settings, 'updateRepos').mockResolvedValue()
+      const pre = new Set(['.github/suborgs/old.yml'])
+      await settings.maybeReevaluateSuborg({ owner: 'o', repo: 'r1' }, { name: 'r1' }, pre, { propertiesChanged: true })
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(settings.reevaluationDepth.get('r1')).toBe(1)
+    })
+
     it('respects MAX_REEVALUATION_DEPTH and logs a warning', async () => {
       const settings = createSettings({})
       settings.reevaluateOnChange = true
@@ -932,11 +946,31 @@ repository:
         await settings.updateOrg()
         expect(ctor).not.toHaveBeenCalled()
       })
+
+      it('23. org custom_repository_roles receives additive=true when listed in additive_plugins', async () => {
+        const instances = []
+        const ctor = jest.fn().mockImplementation(function () {
+          this.sync = jest.fn().mockResolvedValue([])
+          instances.push(this)
+        })
+        Settings.PLUGINS.custom_repository_roles = ctor
+
+        const settings = createSettings({
+          additive_plugins: ['custom_repository_roles'],
+          custom_repository_roles: [{ name: 'sec' }]
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        await settings.updateOrg()
+
+        expect(instances).toHaveLength(1)
+        expect(instances[0].additive).toBe(true)
+      })
     })
 
     // ── updateRepos integration ──────────────────────────────────────────
     describe('updateRepos integration', () => {
-      it('23. org disable repository → RepoPlugin not instantiated', async () => {
+      it('24. org disable repository → RepoPlugin not instantiated', async () => {
         const repoSync = jest.fn().mockResolvedValue([])
         const repoCtor = jest.fn().mockImplementation(() => ({ sync: repoSync, renamed: false, created: false }))
         Settings.PLUGINS.repository = repoCtor
@@ -1021,6 +1055,39 @@ repository:
         const msgs = nopEntries.map(r => r.action.msg)
         expect(msgs.some(m => /labels/.test(m))).toBe(true)
         expect(msgs.some(m => /teams/.test(m))).toBe(true)
+      })
+
+      it('28. base-config filtering preserves org-rulesets informational NopCommands', async () => {
+        stubContext.payload.repository = { owner: { login: 'test' }, name: 'safe-settings' }
+        stubContext.payload.check_run = { id: 123, check_suite: { pull_requests: [{ number: 456 }] } }
+        stubContext.octokit.checks = { update: jest.fn().mockResolvedValue({}) }
+        stubContext.octokit.issues = { createComment: jest.fn().mockResolvedValue({}) }
+
+        const settings = new Settings(true, stubContext, mockRepo, {
+          rulesets: [{ name: 'managed', enforcement: 'disabled' }]
+        }, mockRef)
+        settings.baseConfig = {
+          rulesets: [{ name: 'managed', enforcement: 'active' }]
+        }
+        settings.results = [{
+          type: 'INFO',
+          plugin: 'Rulesets',
+          repo: 'test (org)',
+          endpoint: '',
+          action: {
+            msg: 'Additive mode active: 1 deletion(s) suppressed by additive_plugins',
+            additions: null,
+            modifications: null,
+            deletions: null
+          }
+        }]
+
+        await settings.handleResults()
+
+        expect(stubContext.octokit.checks.update).toHaveBeenCalled()
+        const summary = stubContext.octokit.checks.update.mock.calls[0][0].output.summary
+        expect(summary).toMatch(/Informational messages/)
+        expect(summary).toMatch(/suppressed by additive_plugins/)
       })
     })
   })
@@ -1138,6 +1205,22 @@ repository:
 
     // ── updateRepos integration: additive flag threading ─────────────────
     describe('updateRepos integration: additive flag', () => {
+      it('processes changed repo configs that were not returned by the installation repository list', async () => {
+        const settings = createSettings({ restrictedRepos: {} })
+        const updateReposSpy = jest.spyOn(settings, 'updateRepos').mockResolvedValue([])
+
+        settings.processedRepoNames = new Set(['existing-repo'])
+
+        await settings.updateChangedRepoConfigs([
+          { owner: 'test', repo: 'existing-repo' },
+          { owner: 'test', repo: 'new-repo' },
+          { owner: 'test', repo: 'new-repo' }
+        ])
+
+        expect(updateReposSpy).toHaveBeenCalledTimes(1)
+        expect(updateReposSpy).toHaveBeenCalledWith({ owner: 'test', repo: 'new-repo' })
+      })
+
       it('39. plugin listed in additive_plugins has additive=true set before sync()', async () => {
         const instances = []
         const syncMock = jest.fn().mockResolvedValue([])

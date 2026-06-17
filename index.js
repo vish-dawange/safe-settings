@@ -281,15 +281,6 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       return
     }
 
-    const settingsModified = payload.commits.find(commit => {
-      return commit.added.includes(Settings.FILE_PATH) ||
-        commit.modified.includes(Settings.FILE_PATH)
-    })
-    if (settingsModified) {
-      robot.log.debug(`Changes in '${Settings.FILE_PATH}' detected, doing a full synch...`)
-      return syncAllSettings(false, context)
-    }
-
     let repoChanges = getAllChangedRepoConfigs(payload, context.repo().owner)
 
     let subOrgChanges = getAllChangedSubOrgConfigs(payload)
@@ -298,6 +289,18 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     subOrgChanges = subOrgChanges.filter((s, i, arr) => arr.findIndex(item => item.repo === s.repo) === i)
     robot.log.debug(`deduped repos ${JSON.stringify(repoChanges)}`)
     robot.log.debug(`deduped subOrgs ${JSON.stringify(subOrgChanges)}`)
+
+    const settingsModified = payload.commits.find(commit => {
+      return commit.added.includes(Settings.FILE_PATH) ||
+        commit.modified.includes(Settings.FILE_PATH)
+    })
+    if (settingsModified) {
+      robot.log.debug(`Changes in '${Settings.FILE_PATH}' detected, doing a full synch...`)
+      return syncAllSettings(false, context, context.repo(), payload.after, null, {
+        repos: repoChanges,
+        subOrgs: subOrgChanges
+      })
+    }
 
     if (repoChanges.length > 0 || subOrgChanges.length > 0) {
       return syncSelectedSettings(false, context, repoChanges, subOrgChanges)

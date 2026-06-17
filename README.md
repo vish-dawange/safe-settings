@@ -189,7 +189,7 @@ The comment contains:
 - A header with the run timestamp, the **number of repos considered**, and the **number of repos affected**.
 - **Breakdown of changes** — a collapsible section, grouped by plugin/repo, showing field-level diffs. Each entry is marked as an addition, modification, or deletion, with the before/after values for modified fields. When there are no changes, it shows `No changes to apply.`
 - **Breakdown of errors** — a collapsible section listing any errors by repo, or `None` when there are none. The check run is marked as failed when errors are present.
-- **Informational messages (disabled plugins)** — a collapsible section listing plugins that were skipped via [`disable_plugins`](#disabling-plugins-disable_plugins), so reviewers can see which settings were intentionally not applied.
+- **Informational messages** — a collapsible section listing non-error notices such as plugins skipped via [`disable_plugins`](#disabling-plugins-disable_plugins) or deletions suppressed by `additive_plugins`, so reviewers can see which settings were intentionally not applied.
 
 For very large diffs the comment is split across multiple comments, and the check-run summary is truncated with a notice when it exceeds the size limit.
 
@@ -201,18 +201,18 @@ A repo's suborg membership can depend on state that is itself written by `safe-s
 - `suborgproperties` — repos belong to a suborg because a custom property has a given value
 - `suborgrepos` — repos belong to a suborg because their name matches a glob
 
-When a repo-level change (a push to `.github/repos/<repo>.yml`, or a `repository.created` event for a brand-new repo) adds a team, sets a custom property, or creates a repo whose name matches a suborg's `suborgrepos` glob, the repo may *newly* match a suborg config that was not applied in the first pass.
+When a repo-level change (a push to `.github/repos/<repo>.yml`, or a `repository.created` event for a brand-new repo) adds, removes, or changes a team or custom property, the repo may start or stop matching a suborg config. A new repo may also start matching a suborg because its name matches a `suborgrepos` glob.
 
-To handle this, after applying a repo-yml change `safe-settings` re-evaluates the repo's suborg membership and, if a new suborg now matches, runs the repo through the apply pipeline a second time so the suborg's settings are picked up in the same sync.
+To handle this, after applying a repo-yml change `safe-settings` re-evaluates the repo's suborg membership. If the matched suborg source set changed, it runs the repo through the apply pipeline a second time so newly matched suborg settings are applied and settings from a no-longer-matching suborg can be removed in the same sync.
 
 **Scope:** Re-evaluation runs only on the repo-yml change paths (`Settings.sync` and the per-repo loop of `Settings.syncSelectedRepos`). Global settings changes (`syncAll`) and suborg-yml changes (`syncSubOrgs`) already iterate all relevant repos and do not need it.
 
 **Loop prevention.** Two guards prevent infinite re-evaluation:
 
-1. **Stability check (primary):** Before applying changes, `safe-settings` snapshots the set of suborg source paths that match the repo. After applying, it refreshes the suborg cache and recomputes the set. If no new suborg source appeared, re-evaluation stops.
-2. **Hard depth cap (safety net):** Each repo is re-evaluated at most `MAX_REEVALUATION_DEPTH = 1` time per sync. This resolves the dominant single-hop case (repo change → newly-matched suborg → apply suborg once) while preventing pathological chains (suborg A applies a team that activates suborg B that activates suborg C…). Chains beyond one hop are resolved on the next sync event, and a warning is logged when the cap is hit.
+1. **Stability check (primary):** Before applying changes, `safe-settings` snapshots the set of suborg source paths that match the repo. After applying, it refreshes the suborg cache and recomputes the set. If the set did not change, re-evaluation stops. If a source appeared or disappeared, the repo is processed once more.
+2. **Hard depth cap (safety net):** Each repo is re-evaluated at most `MAX_REEVALUATION_DEPTH = 1` time per sync. This resolves the dominant single-hop case (repo change → suborg membership changed → apply the corrected suborg overlay once) while preventing pathological chains (suborg A applies a team that activates suborg B that activates suborg C…). Chains beyond one hop are resolved on the next sync event, and a warning is logged when the cap is hit.
 
-**Trigger optimization.** Re-evaluation is skipped entirely when the resolved `repoConfig` has no `teams`, no `custom_properties`, and is not a rename — these are the only repo-level changes that can affect suborg matching.
+**Trigger optimization.** Re-evaluation is skipped entirely when the applied repo change did not affect `teams`, `custom_properties`, repository creation, or repository rename state — these are the repo-level changes that can affect suborg matching.
 
 ### Use `safe-settings` to rename repos
 If you rename a `<repo.yml>` that corresponds to a repo, safe-settings will rename the repo to the new name. This behavior will take effect whether the env variable `BLOCK_REPO_RENAME_BY_HUMAN` is set or not.
@@ -804,7 +804,7 @@ The smoke test runs the following phases:
 | **Phase 2** | Removes a team from the repo and verifies safe-settings re-adds it (drift remediation) |
 | **Phase 3** | Creates a rogue ruleset and verifies safe-settings removes it (drift remediation) |
 | **Phase 4** | Creates `demo-repo-service1` with teams, topics, and branch protection |
-| **Phase 5** | Creates a suborg config and verifies org-scoped rulesets are applied to matching repos |
+| **Phase 5** | Creates a property-targeted suborg config, verifies suborg rulesets apply to two matching repos, then changes one repo's custom property and verifies the ruleset is removed only from the repo that no longer matches |
 | **Phase 6** | Archives `demo-repo-service1` and verifies the repo is archived |
 | **Phase 7** | Creates `demo-repo-service2` and verifies suborg rulesets are inherited |
 | **Phase 7b** | Tests external group team sync |

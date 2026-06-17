@@ -88,8 +88,7 @@ describe('Rulesets', () => {
   log.debug = jest.fn()
   log.error = jest.fn()
 
-  function configure (config, scope='repo') {
-    const noop = false
+  function configure (config, scope = 'repo', noop = false) {
     const errors = []
     return new Rulesets(noop, github, { owner: 'jitran', repo: 'test' }, config, log, errors, scope)
   }
@@ -106,14 +105,12 @@ describe('Rulesets', () => {
       request: jest.fn().mockImplementation(() => Promise.resolve('request')),
     }
 
-    github.request.endpoint = {
-      merge: jest.fn().mockReturnValue({
-        method: 'GET',
-        url: '/repos/jitran/test/rulesets',
-        headers: version
-        }
-      )
-    }
+    github.request.endpoint = jest.fn().mockImplementation((route, body) => ({ url: route, body }))
+    github.request.endpoint.merge = jest.fn().mockReturnValue({
+      method: 'GET',
+      url: '/repos/jitran/test/rulesets',
+      headers: version
+    })
   })
 
   describe('sync', () => {
@@ -150,6 +147,35 @@ describe('Rulesets', () => {
           )
         )
       })
+    })
+
+    it('in nop mode treats a missing repo as having no existing rulesets', async () => {
+      const notFound = new Error('Not Found')
+      notFound.status = 404
+      github.paginate = jest.fn().mockRejectedValue(notFound)
+
+      const plugin = configure(
+        [
+          generateRequestRuleset(
+            1,
+            'All branches',
+            repo_conditions,
+            [
+              { context: 'Status Check 1' }
+            ]
+          )
+        ],
+        'repo',
+        true
+      )
+
+      const result = await plugin.sync()
+      const flat = result.flat()
+      const summary = flat.find(command => command.plugin === 'Rulesets' && command.action?.msg === 'Changes found')
+
+      expect(flat.some(command => command.type === 'ERROR')).toBe(false)
+      expect(summary.action.additions['0']).toEqual(expect.objectContaining({ name: 'All branches' }))
+      expect(summary.action.deletions).toBeUndefined()
     })
   })
 
