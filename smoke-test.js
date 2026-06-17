@@ -328,6 +328,13 @@ async function getRepoRuleset (owner, repo, name) {
   } catch { return null }
 }
 
+async function getRepoRulesetDetails (owner, repo, rulesetId) {
+  try {
+    const { data } = await octokit.request('GET /repos/{owner}/{repo}/rulesets/{ruleset_id}', { owner, repo, ruleset_id: rulesetId })
+    return data
+  } catch { return null }
+}
+
 async function setRepoCustomProperty (owner, repo, propertyName, value) {
   await octokit.request('PATCH /repos/{owner}/{repo}/properties/values', {
     owner,
@@ -2309,6 +2316,145 @@ async function teardown () {
   log('Teardown complete')
 }
 
+async function phase15RulesetArrayDrift () {
+  logPhase('Phase 15: Drift remediation - Ruleset array fields (bypass_actors, rules, required_reviewers)')
+
+  if (!GH_TOKEN) throw new Error('GH_TOKEN env var is required for drift tests (set to a fine-grained PAT)')
+
+  // ── 15a: Remove bypass_actors from "synk" ruleset ──────────────────────────
+  // The test repo "synk" ruleset has bypass_actors configured.
+  // Manually empty bypass_actors → safe-settings should detect and restore.
+  {
+    log('15a: Manually emptying bypass_actors on "synk" ruleset (as user)...')
+    const synkRuleset = await getRepoRuleset(ORG, 'test', 'synk')
+    if (!synkRuleset) {
+      logFail('15a: Could not find "synk" ruleset on test repo — was Phase 1 run?')
+    } else {
+      const fullRuleset = await getRepoRulesetDetails(ORG, 'test', synkRuleset.id)
+      if (!fullRuleset) {
+        logFail('15a: Could not fetch ruleset details')
+      } else {
+        const body = JSON.stringify({ ...fullRuleset, bypass_actors: [] })
+        try {
+          execSync(`gh api /repos/${ORG}/test/rulesets/${synkRuleset.id} --method PUT --input -`, {
+            encoding: 'utf8', input: body, stdio: ['pipe', 'pipe', 'pipe']
+          })
+          log('15a: bypass_actors emptied on "synk" ruleset')
+        } catch (e) { logFail(`15a: Could not modify ruleset: ${e.message}`) }
+
+        log('Waiting for safe-settings to remediate...')
+        await sleep(WEBHOOK_SETTLE_MS)
+
+        const restored = await poll(async () => {
+          try {
+            const data = await getRepoRulesetDetails(ORG, 'test', synkRuleset.id)
+            return (data && data.bypass_actors && data.bypass_actors.length > 0) ? data : null
+          } catch { return null }
+        }, { desc: 'bypass_actors to be restored on "synk" ruleset', timeout: 90000 })
+
+        assert(restored !== null, '15a: bypass_actors restored after manual removal (drift detected)')
+        if (restored) {
+          assert(
+            restored.bypass_actors.some(a => a.actor_type === 'OrganizationAdmin'),
+            '15a: OrganizationAdmin bypass actor is present after restoration'
+          )
+        }
+      }
+    }
+  }
+
+  // ── 15b: Add out-of-band rule to "synk" ruleset ────────────────────────────
+  // Add an extra rule not in the YAML config; safe-settings should remove it.
+  {
+    log('15b: Adding out-of-band "non_fast_forward" rule to "synk" ruleset (as user)...')
+    const synkRuleset = await getRepoRuleset(ORG, 'test', 'synk')
+    if (!synkRuleset) {
+      logFail('15b: Could not find "synk" ruleset on test repo')
+    } else {
+      const fullRuleset = await getRepoRulesetDetails(ORG, 'test', synkRuleset.id)
+      if (!fullRuleset) {
+        logFail('15b: Could not fetch ruleset details')
+      } else {
+        const rules = [...(fullRuleset.rules || []), { type: 'non_fast_forward' }]
+        const body = JSON.stringify({ rules })
+        try {
+          execSync(`gh api /repos/${ORG}/test/rulesets/${synkRuleset.id} --method PUT --input -`, {
+            encoding: 'utf8', input: body, stdio: ['pipe', 'pipe', 'pipe']
+          })
+          log('15b: Added out-of-band "non_fast_forward" rule to "synk" ruleset')
+        } catch (e) { logFail(`15b: Could not modify ruleset: ${e.message}`) }
+
+        log('Waiting for safe-settings to remediate...')
+        await sleep(WEBHOOK_SETTLE_MS)
+
+        const reverted = await poll(async () => {
+          try {
+            const data = await getRepoRulesetDetails(ORG, 'test', synkRuleset.id)
+            const hasExtraRule = data && (data.rules || []).some(r => r.type === 'non_fast_forward')
+            return hasExtraRule ? null : data
+          } catch { return null }
+        }, { desc: 'out-of-band rule to be removed from "synk" ruleset', timeout: 90000 })
+
+        assert(reverted !== null, '15b: out-of-band "non_fast_forward" rule removed from "synk" ruleset (drift detected)')
+      }
+    }
+  }
+
+  // ── 15c: Remove required_reviewers from suborg ruleset pull_request rule ───
+  // This test runs only if the suborg "Protect release and production branches"
+  // ruleset is present (requires Phase 5 to have run first).
+  {
+    log('15c: Checking for suborg "Protect release and production branches" ruleset on test repo...')
+    const suborgRuleset = await getRepoRuleset(ORG, 'test', 'Protect release and production branches')
+    if (!suborgRuleset) {
+      log('15c: Suborg ruleset not found — skipping required_reviewers drift test (run Phase 5 first)')
+    } else {
+      const fullRuleset = await getRepoRulesetDetails(ORG, 'test', suborgRuleset.id)
+      if (!fullRuleset) {
+        logFail('15c: Could not fetch suborg ruleset details')
+      } else {
+        const prRule = (fullRuleset.rules || []).find(r => r.type === 'pull_request')
+        const hasRequiredReviewers = prRule && prRule.parameters &&
+          Array.isArray(prRule.parameters.required_reviewers) &&
+          prRule.parameters.required_reviewers.length > 0
+
+        if (!hasRequiredReviewers) {
+          log('15c: Suborg ruleset pull_request rule has no required_reviewers — skipping 15c')
+        } else {
+          log('15c: Manually emptying required_reviewers in pull_request rule (as user)...')
+          const rules = (fullRuleset.rules || []).map(rule => {
+            if (rule.type === 'pull_request') {
+              return { ...rule, parameters: { ...(rule.parameters || {}), required_reviewers: [] } }
+            }
+            return rule
+          })
+          const body = JSON.stringify({ rules })
+          try {
+            execSync(`gh api /repos/${ORG}/test/rulesets/${suborgRuleset.id} --method PUT --input -`, {
+              encoding: 'utf8', input: body, stdio: ['pipe', 'pipe', 'pipe']
+            })
+            log('15c: required_reviewers emptied in pull_request rule')
+          } catch (e) { logFail(`15c: Could not modify ruleset: ${e.message}`) }
+
+          log('Waiting for safe-settings to remediate...')
+          await sleep(WEBHOOK_SETTLE_MS)
+
+          const restored = await poll(async () => {
+            try {
+              const data = await getRepoRulesetDetails(ORG, 'test', suborgRuleset.id)
+              const pr = data && (data.rules || []).find(r => r.type === 'pull_request')
+              const reviewers = pr && pr.parameters && pr.parameters.required_reviewers
+              return (Array.isArray(reviewers) && reviewers.length > 0) ? data : null
+            } catch { return null }
+          }, { desc: 'required_reviewers to be restored in pull_request rule', timeout: 90000 })
+
+          assert(restored !== null, '15c: required_reviewers restored after manual removal (drift detected)')
+        }
+      }
+    }
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main () {
@@ -2358,7 +2504,8 @@ async function main () {
       ['Phase 12: custom_repository_roles', phase12CustomRoles],
       ['Phase 12: rulesets', phase12Rulesets],
       ['Phase 13: variables', phase13Variables],
-      ['Phase 14: regressions', phase14RegressionCoverage]
+      ['Phase 14: regressions', phase14RegressionCoverage],
+      ['Phase 15: Ruleset array drift', phase15RulesetArrayDrift]
     ]
 
     // When --phase is given, only run setup (phase 0) + the requested phase(s).

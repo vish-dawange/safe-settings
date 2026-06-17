@@ -445,4 +445,377 @@ describe('Rulesets', () => {
       })
     })
   })
+
+  describe('changed() method with required_reviewers', () => {
+    it('detects when required_reviewers array changes from populated to empty', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Protect release branches',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/release/*'],
+              exclude: []
+            }
+          },
+          rules: [
+            {
+              type: 'pull_request',
+              parameters: {
+                required_approving_review_count: 1,
+                dismiss_stale_reviews_on_push: false,
+                require_code_owner_review: false,
+                require_last_push_approval: false,
+                required_review_thread_resolution: false,
+                allowed_merge_methods: ['merge', 'squash', 'rebase'],
+                required_reviewers: [
+                  {
+                    minimum_approvals: 1,
+                    file_patterns: ['*.js'],
+                    reviewer: {
+                      id: 11721733,
+                      type: 'Team'
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ])
+
+      // GitHub state after manual removal of required_reviewers
+      const existingRuleset = {
+        name: 'Protect release branches',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/release/*'],
+            exclude: []
+          }
+        },
+        rules: [
+          {
+            type: 'pull_request',
+            parameters: {
+              required_approving_review_count: 1,
+              dismiss_stale_reviews_on_push: false,
+              require_code_owner_review: false,
+              require_last_push_approval: false,
+              required_review_thread_resolution: false,
+              allowed_merge_methods: ['merge', 'squash', 'rebase'],
+              required_reviewers: [] // Empty after manual removal
+            }
+          }
+        ]
+      }
+
+      // YAML config (what safe-settings expects)
+      const attrs = plugin.rulesets[0]
+
+      // The changed() method should detect this difference
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when bypass_actors array changes from populated to empty', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Main protection',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          bypass_actors: [
+            {
+              actor_type: 'OrganizationAdmin',
+              bypass_mode: 'always'
+            }
+          ],
+          rules: [
+            {
+              type: 'creation'
+            }
+          ]
+        }
+      ])
+
+      // GitHub state after manual removal of bypass_actors
+      const existingRuleset = {
+        name: 'Main protection',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        bypass_actors: [], // Empty after manual removal
+        rules: [
+          {
+            type: 'creation'
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when workflows array changes from populated to empty', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Workflow protection',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          rules: [
+            {
+              type: 'workflows',
+              parameters: {
+                do_not_enforce_on_create: false,
+                workflows: [
+                  {
+                    path: '.github/workflows/test.yml',
+                    repository_id: 123456
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ])
+
+      // GitHub state after manual removal of workflows
+      const existingRuleset = {
+        name: 'Workflow protection',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        rules: [
+          {
+            type: 'workflows',
+            parameters: {
+              do_not_enforce_on_create: false,
+              workflows: [] // Empty after manual removal
+            }
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when rules array has item added out-of-band', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Branch rules',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          rules: [
+            {
+              type: 'creation'
+            }
+          ]
+        }
+      ])
+
+      // GitHub state where an extra rule was added manually
+      const existingRuleset = {
+        name: 'Branch rules',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        rules: [
+          {
+            type: 'creation'
+          },
+          {
+            type: 'deletion' // Extra rule added out-of-band
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when required_reviewers item is modified with different file patterns', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Code review',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          rules: [
+            {
+              type: 'pull_request',
+              parameters: {
+                required_approving_review_count: 1,
+                dismiss_stale_reviews_on_push: false,
+                require_code_owner_review: false,
+                require_last_push_approval: false,
+                required_review_thread_resolution: false,
+                allowed_merge_methods: ['merge'],
+                required_reviewers: [
+                  {
+                    minimum_approvals: 1,
+                    file_patterns: ['*.js', '*.ts'],
+                    reviewer: {
+                      id: 999,
+                      type: 'Team'
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ])
+
+      // GitHub state where file patterns were manually changed
+      const existingRuleset = {
+        name: 'Code review',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        rules: [
+          {
+            type: 'pull_request',
+            parameters: {
+              required_approving_review_count: 1,
+              dismiss_stale_reviews_on_push: false,
+              require_code_owner_review: false,
+              require_last_push_approval: false,
+              required_review_thread_resolution: false,
+              allowed_merge_methods: ['merge'],
+              required_reviewers: [
+                {
+                  minimum_approvals: 1,
+                  file_patterns: ['*.py'], // Different patterns
+                  reviewer: {
+                    id: 999,
+                    type: 'Team'
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when bypass_actors item is modified with different bypass_mode', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Bypass config',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          bypass_actors: [
+            {
+              actor_type: 'OrganizationAdmin',
+              bypass_mode: 'always'
+            }
+          ],
+          rules: [
+            {
+              type: 'creation'
+            }
+          ]
+        }
+      ])
+
+      // GitHub state where bypass_mode was manually changed
+      const existingRuleset = {
+        name: 'Bypass config',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        bypass_actors: [
+          {
+            actor_type: 'OrganizationAdmin',
+            bypass_mode: 'pull_request' // Changed from 'always'
+          }
+        ],
+        rules: [
+          {
+            type: 'creation'
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+  })
 })
