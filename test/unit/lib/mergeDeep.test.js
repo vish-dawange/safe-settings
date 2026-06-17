@@ -1314,6 +1314,151 @@ entries:
     // console.log(`diffs ${JSON.stringify(merged, null, 2)}`)
   })
 
+  it('Ruleset Compare detects required_reviewers removal without bypass_actors churn', () => {
+    // Existing ruleset in GitHub: has required_reviewers and a server-defaulted
+    // allowed_merge_methods. GitHub returns actor_id: null for the OrganizationAdmin
+    // bypass actor.
+    const target = {
+      id: 12345,
+        name: 'synk',
+        target: 'branch',
+        source_type: 'Repository',
+        source: 'decyjphr-org/test',
+        enforcement: 'active',
+        node_id: 'RRS_xxx',
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-02T00:00:00Z',
+        current_user_can_bypass: 'always',
+        _links: { self: { href: 'https://api.github.com/repos/x/y/rulesets/12345' } },
+        bypass_actors: [
+          { actor_id: null, actor_type: 'OrganizationAdmin', bypass_mode: 'pull_request' }
+        ],
+        conditions: { ref_name: { exclude: [], include: ['~DEFAULT_BRANCH'] } },
+        rules: [
+          {
+            type: 'pull_request',
+            parameters: {
+              dismiss_stale_reviews_on_push: true,
+              require_code_owner_review: false,
+              require_last_push_approval: false,
+              required_approving_review_count: 2,
+              required_review_thread_resolution: false,
+              required_reviewers: [
+                { minimum_approvals: 1, file_patterns: ['*.js'], reviewer: { id: 11721733, type: 'Team' } }
+              ],
+              allowed_merge_methods: ['merge', 'squash', 'rebase']
+            }
+          }
+        ]
+      }
+    // Config: required_reviewers removed, OrganizationAdmin bypass actor with explicit id.
+    const source = {
+      name: 'synk',
+      target: 'branch',
+      enforcement: 'active',
+      bypass_actors: [
+        { actor_id: 1, actor_type: 'OrganizationAdmin', bypass_mode: 'pull_request' }
+      ],
+      conditions: { ref_name: { exclude: [], include: ['~DEFAULT_BRANCH'] } },
+      rules: [
+        {
+          type: 'pull_request',
+          parameters: {
+            dismiss_stale_reviews_on_push: true,
+            require_code_owner_review: false,
+            require_last_push_approval: false,
+            required_approving_review_count: 2,
+            required_review_thread_resolution: false
+          }
+        }
+      ]
+    }
+    const ignorableFields = []
+    const mockReturnGitHubContext = jest.fn().mockReturnValue({
+      request: () => {}
+    })
+    const mergeDeep = new MergeDeep(
+      log,
+      mockReturnGitHubContext,
+      ignorableFields
+    )
+    const merged = mergeDeep.compareDeep(target, source)
+
+    // The removal of required_reviewers must be detected as a change.
+    expect(merged.hasChanges).toBeTruthy()
+    expect(merged.deletions.rules[0].parameters.required_reviewers).toEqual([
+      { minimum_approvals: 1, file_patterns: ['*.js'], reviewer: { id: 11721733, type: 'Team' } }
+    ])
+    // The OrganizationAdmin bypass actor (actor_id 1 vs null) must NOT churn.
+    expect(merged.additions.bypass_actors).toBeUndefined()
+    expect(merged.deletions.bypass_actors).toBeUndefined()
+    // allowed_merge_methods is a server-managed default and must NOT be a deletion.
+    expect(merged.deletions.rules[0].parameters.allowed_merge_methods).toBeUndefined()
+  })
+
+  it('Ruleset Compare reports no change when unnamed object array keys are reordered', () => {
+    // code_scanning_tools elements are keyed by `tool` (not a NAME_FIELD), so they
+    // fall back to a stable identity. GitHub returns the object keys in a different
+    // order than config; this must NOT produce spurious add/modify/delete churn.
+    const target = {
+      id: 17806629,
+      name: 'Prevent merges when new SONAR alerts are introduced',
+      target: 'branch',
+      source_type: 'Repository',
+      source: 'decyjphr-emu/test',
+      enforcement: 'active',
+      node_id: 'RRS_xxx',
+      created_at: '2026-06-17T18:45:28.141Z',
+      updated_at: '2026-06-17T18:45:28.162Z',
+      current_user_can_bypass: 'always',
+      _links: { self: { href: 'https://x' }, html: { href: 'https://y' } },
+      bypass_actors: [
+        { actor_id: null, actor_type: 'OrganizationAdmin', bypass_mode: 'always' }
+      ],
+      conditions: { ref_name: { exclude: [], include: ['~DEFAULT_BRANCH'] } },
+      rules: [
+        {
+          type: 'code_scanning',
+          parameters: {
+            code_scanning_tools: [
+              { tool: 'Sonar', security_alerts_threshold: 'medium_or_higher', alerts_threshold: 'none' }
+            ]
+          }
+        }
+      ]
+    }
+    const source = {
+      name: 'Prevent merges when new SONAR alerts are introduced',
+      target: 'branch',
+      enforcement: 'active',
+      conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
+      bypass_actors: [
+        { actor_type: 'OrganizationAdmin', bypass_mode: 'always' }
+      ],
+      rules: [
+        {
+          type: 'code_scanning',
+          parameters: {
+            code_scanning_tools: [
+              { tool: 'Sonar', alerts_threshold: 'none', security_alerts_threshold: 'medium_or_higher' }
+            ]
+          }
+        }
+      ]
+    }
+    const ignorableFields = []
+    const mockReturnGitHubContext = jest.fn().mockReturnValue({
+      request: () => {}
+    })
+    const mergeDeep = new MergeDeep(
+      log,
+      mockReturnGitHubContext,
+      ignorableFields
+    )
+    const merged = mergeDeep.compareDeep(target, source)
+    expect(merged.hasChanges).toBeFalsy()
+  })
+
   it('Ruleset Compare Works when required_status_checks change', () => {
     const target = [
       {
