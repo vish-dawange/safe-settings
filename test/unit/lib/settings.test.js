@@ -622,6 +622,20 @@ repository:
       expect(settings.reevaluationDepth.get('r1')).toBe(1)
     })
 
+    it('recurses once when a previously matched suborg source disappears', async () => {
+      const settings = createSettings({})
+      settings.reevaluateOnChange = true
+      settings.subOrgConfigs = {}
+      settings.repoConfigs = { 'r1.yml': { custom_properties: [{ property_name: 'team', value: 'other' }] } }
+      jest.spyOn(settings, 'reloadSubOrgConfigs').mockResolvedValue()
+      jest.spyOn(settings, 'getRepoConfigs').mockResolvedValue({ 'r1.yml': { custom_properties: [{ property_name: 'team', value: 'other' }] } })
+      const updateSpy = jest.spyOn(settings, 'updateRepos').mockResolvedValue()
+      const pre = new Set(['.github/suborgs/old.yml'])
+      await settings.maybeReevaluateSuborg({ owner: 'o', repo: 'r1' }, { name: 'r1' }, pre, { propertiesChanged: true })
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(settings.reevaluationDepth.get('r1')).toBe(1)
+    })
+
     it('respects MAX_REEVALUATION_DEPTH and logs a warning', async () => {
       const settings = createSettings({})
       settings.reevaluateOnChange = true
@@ -929,11 +943,31 @@ repository:
         await settings.updateOrg()
         expect(ctor).not.toHaveBeenCalled()
       })
+
+      it('23. org custom_repository_roles receives additive=true when listed in additive_plugins', async () => {
+        const instances = []
+        const ctor = jest.fn().mockImplementation(function () {
+          this.sync = jest.fn().mockResolvedValue([])
+          instances.push(this)
+        })
+        Settings.PLUGINS.custom_repository_roles = ctor
+
+        const settings = createSettings({
+          additive_plugins: ['custom_repository_roles'],
+          custom_repository_roles: [{ name: 'sec' }]
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        await settings.updateOrg()
+
+        expect(instances).toHaveLength(1)
+        expect(instances[0].additive).toBe(true)
+      })
     })
 
     // ── updateRepos integration ──────────────────────────────────────────
     describe('updateRepos integration', () => {
-      it('23. org disable repository → RepoPlugin not instantiated', async () => {
+      it('24. org disable repository → RepoPlugin not instantiated', async () => {
         const repoSync = jest.fn().mockResolvedValue([])
         const repoCtor = jest.fn().mockImplementation(() => ({ sync: repoSync, renamed: false, created: false }))
         Settings.PLUGINS.repository = repoCtor
@@ -1019,6 +1053,514 @@ repository:
         expect(msgs.some(m => /labels/.test(m))).toBe(true)
         expect(msgs.some(m => /teams/.test(m))).toBe(true)
       })
+
+      it('28. base-config filtering preserves org-rulesets informational NopCommands', async () => {
+        stubContext.payload.repository = { owner: { login: 'test' }, name: 'safe-settings' }
+        stubContext.payload.check_run = { id: 123, check_suite: { pull_requests: [{ number: 456 }] } }
+        stubContext.octokit.checks = { update: jest.fn().mockResolvedValue({}) }
+        stubContext.octokit.issues = { createComment: jest.fn().mockResolvedValue({}) }
+
+        const settings = new Settings(true, stubContext, mockRepo, {
+          rulesets: [{ name: 'managed', enforcement: 'disabled' }]
+        }, mockRef)
+        settings.baseConfig = {
+          rulesets: [{ name: 'managed', enforcement: 'active' }]
+        }
+        settings.results = [{
+          type: 'INFO',
+          plugin: 'Rulesets',
+          repo: 'test (org)',
+          endpoint: '',
+          action: {
+            msg: 'Additive mode active: 1 deletion(s) suppressed by additive_plugins',
+            additions: null,
+            modifications: null,
+            deletions: null
+          }
+        }]
+
+        await settings.handleResults()
+
+        expect(stubContext.octokit.checks.update).toHaveBeenCalled()
+        const summary = stubContext.octokit.checks.update.mock.calls[0][0].output.summary
+        expect(summary).toMatch(/Informational messages/)
+        expect(summary).toMatch(/suppressed by additive_plugins/)
+      })
+    })
+  })
+
+  // ════════════════════════════════════════════════════════════════════════
+  describe('additive_plugins', () => {
+    // ── Settings.ADDITIVE_PLUGINS constant ───────────────────────────────
+    describe('Settings.ADDITIVE_PLUGINS', () => {
+      it('28. contains all 10 Diffable-extending plugin names', () => {
+        const expected = new Set([
+          'labels', 'collaborators', 'teams', 'milestones', 'autolinks',
+          'environments', 'custom_properties', 'variables', 'rulesets',
+          'custom_repository_roles'
+        ])
+        expect(Settings.ADDITIVE_PLUGINS).toEqual(expected)
+      })
+
+      it('29. does NOT include non-Diffable plugins', () => {
+        expect(Settings.ADDITIVE_PLUGINS.has('repository')).toBe(false)
+        expect(Settings.ADDITIVE_PLUGINS.has('archive')).toBe(false)
+        expect(Settings.ADDITIVE_PLUGINS.has('branches')).toBe(false)
+        expect(Settings.ADDITIVE_PLUGINS.has('validator')).toBe(false)
+      })
+    })
+
+    // ── normalizeAdditivePlugins ─────────────────────────────────────────
+    describe('normalizeAdditivePlugins', () => {
+      it('30. returns empty Set when additive_plugins is absent', () => {
+        const settings = createSettings({})
+        expect(settings.normalizeAdditivePlugins().size).toBe(0)
+      })
+
+      it('31. returns correct Set for valid plugin names', () => {
+        const settings = createSettings({ additive_plugins: ['labels', 'teams', 'milestones'] })
+        const result = settings.normalizeAdditivePlugins()
+        expect(result).toEqual(new Set(['labels', 'teams', 'milestones']))
+      })
+
+      it('32. all 10 Diffable plugins are accepted without error', () => {
+        const all = [...Settings.ADDITIVE_PLUGINS]
+        const settings = createSettings({ additive_plugins: all })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result.size).toBe(10)
+        expect(logErrorSpy).not.toHaveBeenCalled()
+        logErrorSpy.mockRestore()
+      })
+
+      it('33. unknown plugin name logs error and is excluded from Set', () => {
+        const settings = createSettings({ additive_plugins: ['labels', 'nope-plugin'] })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result.has('labels')).toBe(true)
+        expect(result.has('nope-plugin')).toBe(false)
+        expect(logErrorSpy).toHaveBeenCalledWith(expect.stringMatching(/unknown or non-Diffable plugin 'nope-plugin'/))
+        logErrorSpy.mockRestore()
+      })
+
+      it('34. non-Diffable plugin name (branches) logs error and is excluded', () => {
+        const settings = createSettings({ additive_plugins: ['branches'] })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result.has('branches')).toBe(false)
+        expect(logErrorSpy).toHaveBeenCalledWith(expect.stringMatching(/unknown or non-Diffable plugin 'branches'/))
+        logErrorSpy.mockRestore()
+      })
+
+      it('35. non-string entries log error and are skipped', () => {
+        const settings = createSettings({ additive_plugins: ['labels', 42, null] })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result).toEqual(new Set(['labels']))
+        expect(logErrorSpy).toHaveBeenCalledTimes(2) // 42 + null
+        logErrorSpy.mockRestore()
+      })
+
+      it('36. non-array value logs error and returns empty Set', () => {
+        const settings = createSettings({ additive_plugins: 'labels' })
+        const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
+        const result = settings.normalizeAdditivePlugins()
+        expect(result.size).toBe(0)
+        expect(logErrorSpy).toHaveBeenCalledWith(expect.stringMatching(/must be an array/))
+        logErrorSpy.mockRestore()
+      })
+    })
+
+    // ── childPluginsList returns triplets ────────────────────────────────
+    describe('childPluginsList triplets', () => {
+      it('37. each entry includes section name as 3rd element', () => {
+        const settings = createSettings({ labels: [{ name: 'bug', color: 'red' }] })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const list = settings.childPluginsList({ repo: 'foo' })
+        expect(list.length).toBeGreaterThan(0)
+        list.forEach(entry => {
+          expect(entry.length).toBe(3)
+          expect(typeof entry[2]).toBe('string')
+          expect(entry[2]).toMatch(/^[a-z_]+$/)
+        })
+      })
+
+      it('38. section names map to the correct Settings.PLUGINS keys', () => {
+        const settings = createSettings({
+          labels: [{ name: 'bug', color: 'red' }],
+          teams: [{ name: 'core', permission: 'push' }]
+        })
+        settings.subOrgConfigs = {}
+        settings.repoConfigs = {}
+        const list = settings.childPluginsList({ repo: 'foo' })
+        list.forEach(([Plugin, , section]) => {
+          expect(Settings.PLUGINS[section]).toBe(Plugin)
+        })
+      })
+    })
+
+    // ── updateRepos integration: additive flag threading ─────────────────
+    describe('updateRepos integration: additive flag', () => {
+      it('processes changed repo configs that were not returned by the installation repository list', async () => {
+        const settings = createSettings({ restrictedRepos: {} })
+        const updateReposSpy = jest.spyOn(settings, 'updateRepos').mockResolvedValue([])
+
+        settings.processedRepoNames = new Set(['existing-repo'])
+
+        await settings.updateChangedRepoConfigs([
+          { owner: 'test', repo: 'existing-repo' },
+          { owner: 'test', repo: 'new-repo' },
+          { owner: 'test', repo: 'new-repo' }
+        ])
+
+        expect(updateReposSpy).toHaveBeenCalledTimes(1)
+        expect(updateReposSpy).toHaveBeenCalledWith({ owner: 'test', repo: 'new-repo' })
+      })
+
+      it('39. plugin listed in additive_plugins has additive=true set before sync()', async () => {
+        const instances = []
+        const syncMock = jest.fn().mockResolvedValue([])
+        const LabelsCtor = jest.fn().mockImplementation(function (...args) {
+          this.sync = syncMock
+          this.hasChanges = false
+          instances.push(this)
+        })
+        const savedLabels = Settings.PLUGINS.labels
+        Settings.PLUGINS.labels = LabelsCtor
+
+        const repoSync = jest.fn().mockResolvedValue([])
+        Settings.PLUGINS.repository = jest.fn().mockImplementation(() => ({
+          sync: repoSync, renamed: false, created: false
+        }))
+
+        try {
+          const settings = createSettings({
+            additive_plugins: ['labels'],
+            labels: [{ name: 'bug', color: 'red' }]
+          })
+          settings.subOrgConfigs = {}
+          settings.repoConfigs = {}
+          // Clear subOrgConfigMap so the "suborg-change early return" in
+          // updateRepos does not fire (mockSubOrg='frontend' sets it in ctor).
+          settings.subOrgConfigMap = null
+          // Mock childPluginsList to return just the labels triplet so we can
+          // control what updateRepos sees without mocking all other plugins.
+          jest.spyOn(settings, 'childPluginsList').mockReturnValue([
+            [LabelsCtor, [{ name: 'bug', color: 'red' }], 'labels']
+          ])
+          jest.spyOn(settings, 'maybeReevaluateSuborg').mockResolvedValue(undefined)
+          await settings.updateRepos({ owner: 'o', repo: 'r' })
+          expect(instances.length).toBeGreaterThan(0)
+          // Every labels instance must have additive=true
+          instances.forEach(inst => expect(inst.additive).toBe(true))
+        } finally {
+          Settings.PLUGINS.labels = savedLabels
+        }
+      })
+
+      it('40. plugin NOT in additive_plugins has additive=false (default)', async () => {
+        const instances = []
+        const syncMock = jest.fn().mockResolvedValue([])
+        const TeamsCtor = jest.fn().mockImplementation(function (...args) {
+          this.sync = syncMock
+          this.hasChanges = false
+          instances.push(this)
+        })
+        const savedTeams = Settings.PLUGINS.teams
+        Settings.PLUGINS.teams = TeamsCtor
+
+        Settings.PLUGINS.repository = jest.fn().mockImplementation(() => ({
+          sync: jest.fn().mockResolvedValue([]), renamed: false, created: false
+        }))
+
+        try {
+          const settings = createSettings({
+            additive_plugins: ['labels'], // teams is NOT listed
+            teams: [{ name: 'core', permission: 'push' }]
+          })
+          settings.subOrgConfigs = {}
+          settings.repoConfigs = {}
+          // Clear subOrgConfigMap so the "suborg-change early return" does not fire.
+          settings.subOrgConfigMap = null
+          jest.spyOn(settings, 'childPluginsList').mockReturnValue([
+            [TeamsCtor, [{ name: 'core', permission: 'push' }], 'teams']
+          ])
+          jest.spyOn(settings, 'maybeReevaluateSuborg').mockResolvedValue(undefined)
+          await settings.updateRepos({ owner: 'o', repo: 'r' })
+          expect(instances.length).toBeGreaterThan(0)
+          instances.forEach(inst => expect(inst.additive).toBe(false))
+        } finally {
+          Settings.PLUGINS.teams = savedTeams
+        }
+      })
+    })
+
+    // ── Diffable.sync() additive behaviour ───────────────────────────────
+    describe('Diffable.sync() additive behaviour', () => {
+      const Diffable = require('../../../lib/plugins/diffable')
+
+      // Minimal concrete Diffable subclass for testing.
+      class TestDiffable extends Diffable {
+        constructor (nop, entries) {
+          super(nop, {}, { owner: 'o', repo: 'r' }, entries, { debug: jest.fn(), info: jest.fn(), error: jest.fn() }, [])
+        }
+
+        find () { return Promise.resolve(this._existing || []) }
+        comparator (a, b) { return a.name === b.name }
+        changed (a, b) { return a.value !== b.value }
+        add (attrs) { return Promise.resolve([]) }
+        update (existing, attrs) { return Promise.resolve([]) }
+        remove (existing) { return Promise.resolve([]) }
+      }
+
+      it('41. additive=false → remove() is called for unmatched existing entries', async () => {
+        const plugin = new TestDiffable(false, [{ name: 'keep', value: '1' }])
+        plugin._existing = [
+          { name: 'keep', value: '1' },
+          { name: 'gone', value: '2' } // this one has no match in entries
+        ]
+        plugin.additive = false
+        const removeSpy = jest.spyOn(plugin, 'remove').mockResolvedValue([])
+        await plugin.sync()
+        expect(removeSpy).toHaveBeenCalledTimes(1)
+        expect(removeSpy).toHaveBeenCalledWith(expect.objectContaining({ name: 'gone' }))
+        removeSpy.mockRestore()
+      })
+
+      it('42. additive=true → remove() is NOT called even when existing entries have no YAML match', async () => {
+        const plugin = new TestDiffable(false, [{ name: 'keep', value: '1' }])
+        plugin._existing = [
+          { name: 'keep', value: '1' },
+          { name: 'gone', value: '2' }
+        ]
+        plugin.additive = true
+        const removeSpy = jest.spyOn(plugin, 'remove').mockResolvedValue([])
+        await plugin.sync()
+        expect(removeSpy).not.toHaveBeenCalled()
+        removeSpy.mockRestore()
+      })
+
+      it('43. additive=true → add() is still called for new YAML entries', async () => {
+        const plugin = new TestDiffable(false, [
+          { name: 'existing', value: '1' },
+          { name: 'new-entry', value: '2' }
+        ])
+        plugin._existing = [{ name: 'existing', value: '1' }]
+        plugin.additive = true
+        const addSpy = jest.spyOn(plugin, 'add').mockResolvedValue([])
+        const removeSpy = jest.spyOn(plugin, 'remove').mockResolvedValue([])
+        await plugin.sync()
+        expect(addSpy).toHaveBeenCalledWith(expect.objectContaining({ name: 'new-entry' }))
+        expect(removeSpy).not.toHaveBeenCalled()
+        addSpy.mockRestore()
+        removeSpy.mockRestore()
+      })
+
+      it('44. additive=true → update() is still called for changed entries', async () => {
+        const plugin = new TestDiffable(false, [{ name: 'item', value: 'new' }])
+        plugin._existing = [{ name: 'item', value: 'old' }]
+        plugin.additive = true
+        const updateSpy = jest.spyOn(plugin, 'update').mockResolvedValue([])
+        const removeSpy = jest.spyOn(plugin, 'remove').mockResolvedValue([])
+        await plugin.sync()
+        expect(updateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'item', value: 'old' }),
+          expect.objectContaining({ name: 'item', value: 'new' })
+        )
+        expect(removeSpy).not.toHaveBeenCalled()
+        updateSpy.mockRestore()
+        removeSpy.mockRestore()
+      })
+
+      it('45. NOP mode + additive=true + deletions present → INFO NopCommand about suppressed deletions', async () => {
+        const plugin = new TestDiffable(true, [{ name: 'keep', value: '1' }])
+        plugin._existing = [
+          { name: 'keep', value: '1' },
+          { name: 'gone', value: '2' }
+        ]
+        plugin.additive = true
+        const result = await plugin.sync()
+        const suppressed = result.flat().filter(cmd =>
+          cmd && cmd.type === 'INFO' && /suppressed by additive_plugins/i.test(cmd.action.msg)
+        )
+        expect(suppressed.length).toBeGreaterThan(0)
+        expect(suppressed[0].action.msg).toMatch(/1 deletion/)
+      })
+
+      it('46. NOP mode + additive=true + NO deletions → no suppressed message emitted', async () => {
+        const plugin = new TestDiffable(true, [{ name: 'item', value: '1' }])
+        plugin._existing = [{ name: 'item', value: '1' }] // identical → no changes at all
+        plugin.additive = true
+        const result = await plugin.sync()
+        if (result) {
+          const suppressed = result.flat().filter(cmd =>
+            cmd && cmd.action && /suppressed by additive_plugins/i.test(cmd.action.msg)
+          )
+          expect(suppressed.length).toBe(0)
+        }
+        // result may be undefined (no changes) which is also correct
+      })
+    })
+  })
+
+  describe('getReposRemovedFromSubOrgTargeting', () => {
+    let settings
+
+    beforeEach(() => {
+      stubConfig = { restrictedRepos: {} }
+      settings = createSettings(stubConfig)
+    })
+
+    it('returns empty array when no changedSubOrgs provided', async () => {
+      const result = await settings.getReposRemovedFromSubOrgTargeting([], 'prev-sha')
+      expect(result).toEqual([])
+    })
+
+    it('returns empty array when no baseRef provided', async () => {
+      const result = await settings.getReposRemovedFromSubOrgTargeting([{ path: '.github/suborgs/frontend.yml' }], null)
+      expect(result).toEqual([])
+    })
+
+    it('identifies repos removed from suborgrepos targeting', async () => {
+      // Previous config had repo-a and repo-b in suborgrepos
+      const previousContent = Buffer.from(yaml.dump({
+        suborgrepos: ['repo-a', 'repo-b'],
+        teams: [{ name: 'core', permission: 'push' }]
+      })).toString('base64')
+
+      stubContext.octokit.repos.getContent = jest.fn().mockImplementation((params) => {
+        if (params.ref === 'prev-sha') {
+          return Promise.resolve({ data: { content: previousContent } })
+        }
+        // Current config: default mock (has new-repo in suborgrepos)
+        const currentContent = Buffer.from(yaml.dump({
+          suborgrepos: ['repo-b'],
+          teams: [{ name: 'core', permission: 'push' }]
+        })).toString('base64')
+        return Promise.resolve({ data: { content: currentContent } })
+      })
+
+      // Current subOrgConfigs only has repo-b (repo-a was removed from targeting)
+      settings.subOrgConfigs = {
+        'repo-b': { source: '.github/suborgs/frontend.yml' }
+      }
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [{ path: '.github/suborgs/frontend.yml', name: 'frontend' }],
+        'prev-sha'
+      )
+
+      expect(result).toContain('repo-a')
+      expect(result).not.toContain('repo-b')
+    })
+
+    it('identifies repos removed from suborgteams targeting', async () => {
+      // Previous config used suborgteams: [team-a]
+      const previousContent = Buffer.from(yaml.dump({
+        suborgteams: ['team-a'],
+        teams: [{ name: 'core', permission: 'push' }]
+      })).toString('base64')
+
+      stubContext.octokit.repos.getContent = jest.fn().mockImplementation((params) => {
+        if (params.ref === 'prev-sha') {
+          return Promise.resolve({ data: { content: previousContent } })
+        }
+        return Promise.resolve({ data: { content: previousContent } })
+      })
+
+      // Mock getReposForTeam to return repos for team-a
+      settings.getReposForTeam = jest.fn().mockResolvedValue([
+        { name: 'team-repo-1' },
+        { name: 'team-repo-2' }
+      ])
+
+      // Current subOrgConfigs: only team-repo-1 still matches (team-repo-2 was removed)
+      settings.subOrgConfigs = {
+        'team-repo-1': { source: '.github/suborgs/frontend.yml' }
+      }
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [{ path: '.github/suborgs/frontend.yml', name: 'frontend' }],
+        'prev-sha'
+      )
+
+      expect(result).toContain('team-repo-2')
+      expect(result).not.toContain('team-repo-1')
+    })
+
+    it('identifies repos removed from suborgproperties targeting', async () => {
+      // Previous config used suborgproperties
+      const previousContent = Buffer.from(yaml.dump({
+        suborgproperties: [{ EDP: true }],
+        teams: [{ name: 'core', permission: 'push' }]
+      })).toString('base64')
+
+      stubContext.octokit.repos.getContent = jest.fn().mockImplementation((params) => {
+        if (params.ref === 'prev-sha') {
+          return Promise.resolve({ data: { content: previousContent } })
+        }
+        return Promise.resolve({ data: { content: previousContent } })
+      })
+
+      // Mock getSubOrgRepositories to return repos with the property
+      settings.getSubOrgRepositories = jest.fn().mockResolvedValue([
+        { repository_name: 'prop-repo-1' },
+        { repository_name: 'prop-repo-2' }
+      ])
+
+      // Current subOrgConfigs: only prop-repo-1 still matches
+      settings.subOrgConfigs = {
+        'prop-repo-1': { source: '.github/suborgs/frontend.yml' }
+      }
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [{ path: '.github/suborgs/frontend.yml', name: 'frontend' }],
+        'prev-sha'
+      )
+
+      expect(result).toContain('prop-repo-2')
+      expect(result).not.toContain('prop-repo-1')
+    })
+
+    it('deduplicates removed repos across multiple suborg files', async () => {
+      const previousContent = Buffer.from(yaml.dump({
+        suborgrepos: ['repo-a', 'repo-b']
+      })).toString('base64')
+
+      stubContext.octokit.repos.getContent = jest.fn().mockResolvedValue({
+        data: { content: previousContent }
+      })
+
+      // Neither repo matches current targeting
+      settings.subOrgConfigs = {}
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [
+          { path: '.github/suborgs/frontend.yml', name: 'frontend' },
+          { path: '.github/suborgs/frontend.yml', name: 'frontend' } // duplicate
+        ],
+        'prev-sha'
+      )
+
+      // Should be deduplicated
+      const repoACount = result.filter(r => r === 'repo-a').length
+      expect(repoACount).toBe(1)
+    })
+
+    it('handles 404 gracefully when previous file does not exist', async () => {
+      stubContext.octokit.repos.getContent = jest.fn().mockRejectedValue(
+        Object.assign(new Error('Not Found'), { status: 404 })
+      )
+
+      settings.subOrgConfigs = {}
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [{ path: '.github/suborgs/new-suborg.yml', name: 'new-suborg' }],
+        'prev-sha'
+      )
+
+      expect(result).toEqual([])
     })
   })
 }) // Settings Tests

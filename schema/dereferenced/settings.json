@@ -174,6 +174,19 @@
               "description": "Either `true` to enable the wiki for this repository or `false` to disable it.",
               "default": true
             },
+            "has_pull_requests": {
+              "type": "boolean",
+              "description": "Either `true` to allow pull requests for this repository or `false` to prevent pull requests.",
+              "default": true
+            },
+            "pull_request_creation_policy": {
+              "type": "string",
+              "description": "The policy that controls who can create pull requests for this repository: `all` or `collaborators_only`.",
+              "enum": [
+                "all",
+                "collaborators_only"
+              ]
+            },
             "is_template": {
               "type": "boolean",
               "description": "Either `true` to make this repo available as a template repository or `false` to prevent it.",
@@ -794,6 +807,10 @@
                     "exempt"
                   ],
                   "default": "always"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Human-friendly alternative to `actor_id`. The team slug, username, GitHub App slug, or repository role name (resolved using `actor_type`). Cannot be combined with `actor_id`."
                 }
               }
             }
@@ -1258,10 +1275,13 @@
                                     "enum": [
                                       "Team"
                                     ]
+                                  },
+                                  "slug": {
+                                    "type": "string",
+                                    "description": "Human-friendly alternative to `id`. The slug of the team that must review changes to matching files. Cannot be combined with `id`."
                                   }
                                 },
                                 "required": [
-                                  "id",
                                   "type"
                                 ]
                               }
@@ -1915,6 +1935,25 @@
             "description": "Additional fine-grained permissions included in this role."
           }
         }
+      }
+    },
+    "additive_plugins": {
+      "description": "List of Diffable plugins to run in additive mode. In additive mode the plugin will only add and update entries; it will never call remove(), so items that exist on GitHub but are absent from the YAML are preserved. Only Diffable-extending plugins are supported (labels, collaborators, teams, milestones, autolinks, environments, custom_properties, variables, rulesets, custom_repository_roles). Declare only in settings.yml (org level) to keep behavior consistent across all repos.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "labels",
+          "collaborators",
+          "teams",
+          "milestones",
+          "autolinks",
+          "environments",
+          "custom_properties",
+          "variables",
+          "rulesets",
+          "custom_repository_roles"
+        ]
       }
     },
     "disable_plugins": {

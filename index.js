@@ -5,6 +5,7 @@ const cron = require('node-cron')
 const Glob = require('./lib/glob')
 const ConfigManager = require('./lib/configManager')
 const NopCommand = require('./lib/nopcommand')
+const SettingsGenerator = require('./lib/settingsGenerator')
 const env = require('./lib/env')
 const { setupRoutes } = require('./lib/routes')
 const { initCache } = require('./lib/installationCache')
@@ -14,6 +15,7 @@ let deploymentConfig
 
 module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) => {
   let appSlug = 'safe-settings'
+<<<<<<< HEAD
 
   // Initialize all routes (static UI + API) via centralized module
   setupRoutes(robot, getRouter)
@@ -22,6 +24,9 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
   initCache(robot)
 
   async function syncAllSettings (nop, context, repo = context.repo(), ref) {
+=======
+  async function syncAllSettings (nop, context, repo = context.repo(), ref, baseRef, changedFiles = {}) {
+>>>>>>> origin/decyjphr-fix-suborg-targeting-removal
     try {
       deploymentConfig = await loadYamlFileSystem()
       robot.log.debug(`deploymentConfig is ${JSON.stringify(deploymentConfig)}`)
@@ -29,8 +34,21 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       const runtimeConfig = await configManager.loadGlobalSettingsYaml()
       const config = Object.assign({}, deploymentConfig, runtimeConfig)
       robot.log.debug(`config for ref ${ref} is ${JSON.stringify(config)}`)
+
+      // Load base branch config for NOP filtering (only show PR-introduced changes)
+      let baseConfig = null
+      if (nop && baseRef) {
+        try {
+          const baseConfigManager = new ConfigManager(context, baseRef)
+          const baseRuntimeConfig = await baseConfigManager.loadGlobalSettingsYaml()
+          baseConfig = Object.assign({}, deploymentConfig, baseRuntimeConfig)
+        } catch (e) {
+          robot.log.debug(`Could not load base config for NOP filtering: ${e.message}`)
+        }
+      }
+
       if (ref) {
-        return Settings.syncAll(nop, context, repo, config, ref)
+        return Settings.syncAll(nop, context, repo, config, ref, baseConfig, changedFiles)
       } else {
         return Settings.syncAll(nop, context, repo, config)
       }
@@ -75,7 +93,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     }
   }
 
-  async function syncSelectedSettings (nop, context, repos, subOrgs, ref) {
+  async function syncSelectedSettings (nop, context, repos, subOrgs, ref, baseRef) {
     try {
       deploymentConfig = await loadYamlFileSystem()
       robot.log.debug(`deploymentConfig is ${JSON.stringify(deploymentConfig)}`)
@@ -83,7 +101,20 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       const runtimeConfig = await configManager.loadGlobalSettingsYaml()
       const config = Object.assign({}, deploymentConfig, runtimeConfig)
       robot.log.debug(`config for ref ${ref} is ${JSON.stringify(config)}`)
-      return Settings.syncSelectedRepos(nop, context, repos, subOrgs, config, ref)
+
+      // Load base branch config for NOP filtering (only show PR-introduced changes)
+      let baseConfig = null
+      if (nop && baseRef) {
+        try {
+          const baseConfigManager = new ConfigManager(context, baseRef)
+          const baseRuntimeConfig = await baseConfigManager.loadGlobalSettingsYaml()
+          baseConfig = Object.assign({}, deploymentConfig, baseRuntimeConfig)
+        } catch (e) {
+          robot.log.debug(`Could not load base config for NOP filtering: ${e.message}`)
+        }
+      }
+
+      return Settings.syncSelectedRepos(nop, context, repos, subOrgs, config, ref, baseConfig, baseRef)
     } catch (e) {
       if (nop) {
         let filename = env.SETTINGS_FILE_PATH
@@ -264,15 +295,6 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       return
     }
 
-    const settingsModified = payload.commits.find(commit => {
-      return commit.added.includes(Settings.FILE_PATH) ||
-        commit.modified.includes(Settings.FILE_PATH)
-    })
-    if (settingsModified) {
-      robot.log.debug(`Changes in '${Settings.FILE_PATH}' detected, doing a full synch...`)
-      return syncAllSettings(false, context)
-    }
-
     let repoChanges = getAllChangedRepoConfigs(payload, context.repo().owner)
 
     let subOrgChanges = getAllChangedSubOrgConfigs(payload)
@@ -282,8 +304,20 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     robot.log.debug(`deduped repos ${JSON.stringify(repoChanges)}`)
     robot.log.debug(`deduped subOrgs ${JSON.stringify(subOrgChanges)}`)
 
+    const settingsModified = payload.commits.find(commit => {
+      return commit.added.includes(Settings.FILE_PATH) ||
+        commit.modified.includes(Settings.FILE_PATH)
+    })
+    if (settingsModified) {
+      robot.log.debug(`Changes in '${Settings.FILE_PATH}' detected, doing a full synch...`)
+      return syncAllSettings(false, context, context.repo(), payload.after, null, {
+        repos: repoChanges,
+        subOrgs: subOrgChanges
+      })
+    }
+
     if (repoChanges.length > 0 || subOrgChanges.length > 0) {
-      return syncSelectedSettings(false, context, repoChanges, subOrgChanges)
+      return syncSelectedSettings(false, context, repoChanges, subOrgChanges, payload.after, payload.before)
     }
 
     robot.log.debug(`No changes in '${Settings.FILE_PATH}' detected, returning...`)
@@ -600,17 +634,21 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     const files = changes.data.map(f => { return f.filename })
 
     const settingsModified = files.includes(Settings.FILE_PATH)
-
-    if (settingsModified) {
-      robot.log.debug(`Changes in '${Settings.FILE_PATH}' detected, doing a full synch...`)
-      return syncAllSettings(true, context, context.repo(), pull_request.head.ref)
-    }
-
     const repoChanges = getChangedRepoConfigName(files, context.repo().owner)
     const subOrgChanges = getChangedSubOrgConfigName(files)
 
+    if (settingsModified) {
+      robot.log.debug(`Changes in '${Settings.FILE_PATH}' detected, doing a full synch...`)
+      const baseRef = pull_request.base.ref || repository.default_branch
+      return syncAllSettings(true, context, context.repo(), pull_request.head.ref, baseRef, {
+        repos: repoChanges,
+        subOrgs: subOrgChanges
+      })
+    }
+
     if (repoChanges.length > 0 || subOrgChanges.length > 0) {
-      return syncSelectedSettings(true, context, repoChanges, subOrgChanges, pull_request.head.ref)
+      const baseRef = pull_request.base.ref || repository.default_branch
+      return syncSelectedSettings(true, context, repoChanges, subOrgChanges, pull_request.head.ref, baseRef)
     }
 
     // if no safe-settings changes detected, send a success to the check run
@@ -660,6 +698,137 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     return syncSettings(false, context)
   })
 
+  /**
+   * Generate safe-settings YAML from the current state of a repo / org /
+   * collection-of-repos and open a PR against the admin repo with the result.
+   *
+   * @param {import('probot').Context} context
+   * @param {object} opts
+   * @param {'repo'|'org'|'custom-property'} opts.sourceType
+   * @param {string} opts.sourceValue
+   * @param {string} [opts.propertyName]
+   * @param {boolean} [opts.overwrite]
+   */
+  async function generateSettings (context, opts) {
+    const owner = context.repo().owner
+    const github = context.octokit
+    const generator = new SettingsGenerator(github, owner, { log: robot.log })
+
+    const { filePath, yaml: content } = await generator.generate({
+      sourceType: opts.sourceType,
+      sourceValue: opts.sourceValue,
+      propertyName: opts.propertyName
+    })
+
+    const targetPath = await resolveOutputPath(context, filePath, opts.overwrite)
+    return openSettingsPR(context, targetPath, content, opts)
+  }
+
+  /**
+   * Honor the overwrite/.sample rule against the admin repo: if overwrite is
+   * false and the file already exists on the default branch, target a
+   * `<name>.sample.yml` path instead.
+   */
+  async function resolveOutputPath (context, filePath, overwrite) {
+    if (overwrite) return filePath
+    const { owner } = context.repo()
+    try {
+      await context.octokit.repos.getContent({ owner, repo: env.ADMIN_REPO, path: filePath })
+      // File exists -> redirect to .sample
+      return filePath.replace(/(\.ya?ml)$/i, '.sample$1')
+    } catch (e) {
+      if (e.status === 404) return filePath
+      throw e
+    }
+  }
+
+  /**
+   * Create a branch on the admin repo, commit the generated file, and open a PR.
+   */
+  async function openSettingsPR (context, filePath, content, opts) {
+    const github = context.octokit
+    const { owner } = context.repo()
+    const repo = env.ADMIN_REPO
+
+    const repoInfo = await github.repos.get({ owner, repo })
+    const baseBranch = repoInfo.data.default_branch
+    const baseRef = await github.git.getRef({ owner, repo, ref: `heads/${baseBranch}` })
+    const branchName = `safe-settings-generate/${opts.sourceType}-${opts.sourceValue}-${Date.now()}`.replace(/[^a-zA-Z0-9/_.-]/g, '-')
+
+    await github.git.createRef({
+      owner,
+      repo,
+      ref: `refs/heads/${branchName}`,
+      sha: baseRef.data.object.sha
+    })
+
+    let existingSha
+    try {
+      const existing = await github.repos.getContent({ owner, repo, path: filePath, ref: branchName })
+      existingSha = existing.data.sha
+    } catch (e) {
+      if (e.status !== 404) throw e
+    }
+
+    await github.repos.createOrUpdateFileContents({
+      owner,
+      repo,
+      path: filePath,
+      branch: branchName,
+      message: `Generate ${filePath} from current ${opts.sourceType} settings`,
+      content: Buffer.from(content).toString('base64'),
+      sha: existingSha
+    })
+
+    const pr = await github.pulls.create({
+      owner,
+      repo,
+      title: `Generate safe-settings config for ${opts.sourceType}: ${opts.sourceValue}`,
+      head: branchName,
+      base: baseBranch,
+      body: [
+        `Auto-generated safe-settings configuration from the current state of \`${opts.sourceType}\` \`${opts.sourceValue}\`.`,
+        '',
+        `- File: \`${filePath}\``,
+        `- Overwrite: \`${!!opts.overwrite}\``,
+        '',
+        'Review carefully before merging. Run in nop mode to confirm there are no unexpected diffs.'
+      ].join('\n')
+    })
+
+    robot.log.info(`Opened settings-generation PR #${pr.data.number} (${filePath})`)
+    return pr.data
+  }
+
+  // Trigger generation via a repository_dispatch event:
+  //   event_type: safe-settings-generate
+  //   client_payload: { source_type, source_value, overwrite, property_name? }
+  robot.on('repository_dispatch', async context => {
+    const { payload } = context
+    if (payload.action !== 'safe-settings-generate') {
+      robot.log.debug(`Ignoring repository_dispatch action "${payload.action}"`)
+      return
+    }
+    const cp = payload.client_payload || {}
+    const sourceType = cp.source_type
+    const sourceValue = cp.source_value
+    if (!sourceType || !sourceValue) {
+      robot.log.error('repository_dispatch safe-settings-generate requires source_type and source_value')
+      return
+    }
+    try {
+      return await generateSettings(context, {
+        sourceType,
+        sourceValue,
+        propertyName: cp.property_name,
+        overwrite: cp.overwrite === true || cp.overwrite === 'true'
+      })
+    } catch (e) {
+      robot.log.error(`Failed to generate settings: ${e.stack || e}`)
+      throw e
+    }
+  })
+
   if (process.env.CRON) {
     /*
     # ┌────────────── second (optional)
@@ -682,6 +851,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
   info()
 
   return {
-    syncInstallation
+    syncInstallation,
+    generateSettings
   }
 }

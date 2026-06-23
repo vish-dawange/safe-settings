@@ -88,8 +88,7 @@ describe('Rulesets', () => {
   log.debug = jest.fn()
   log.error = jest.fn()
 
-  function configure (config, scope = 'repo') {
-    const noop = false
+  function configure (config, scope = 'repo', noop = false) {
     const errors = []
     return new Rulesets(noop, github, { owner: 'jitran', repo: 'test' }, config, log, errors, scope)
   }
@@ -106,14 +105,12 @@ describe('Rulesets', () => {
       request: jest.fn().mockImplementation(() => Promise.resolve('request'))
     }
 
-    github.request.endpoint = {
-      merge: jest.fn().mockReturnValue({
-        method: 'GET',
-        url: '/repos/jitran/test/rulesets',
-        headers: version
-      }
-      )
-    }
+    github.request.endpoint = jest.fn().mockImplementation((route, body) => ({ url: route, body }))
+    github.request.endpoint.merge = jest.fn().mockReturnValue({
+      method: 'GET',
+      url: '/repos/jitran/test/rulesets',
+      headers: version
+    })
   })
 
   describe('sync', () => {
@@ -150,6 +147,35 @@ describe('Rulesets', () => {
           )
         )
       })
+    })
+
+    it('in nop mode treats a missing repo as having no existing rulesets', async () => {
+      const notFound = new Error('Not Found')
+      notFound.status = 404
+      github.paginate = jest.fn().mockRejectedValue(notFound)
+
+      const plugin = configure(
+        [
+          generateRequestRuleset(
+            1,
+            'All branches',
+            repo_conditions,
+            [
+              { context: 'Status Check 1' }
+            ]
+          )
+        ],
+        'repo',
+        true
+      )
+
+      const result = await plugin.sync()
+      const flat = result.flat()
+      const summary = flat.find(command => command.plugin === 'Rulesets' && command.action?.msg === 'Changes found')
+
+      expect(flat.some(command => command.type === 'ERROR')).toBe(false)
+      expect(summary.action.additions['0']).toEqual(expect.objectContaining({ name: 'All branches' }))
+      expect(summary.action.deletions).toBeUndefined()
     })
   })
 
@@ -417,6 +443,575 @@ describe('Rulesets', () => {
           )
         )
       })
+    })
+  })
+
+  describe('changed() method with required_reviewers', () => {
+    it('detects when required_reviewers array changes from populated to empty', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Protect release branches',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/release/*'],
+              exclude: []
+            }
+          },
+          rules: [
+            {
+              type: 'pull_request',
+              parameters: {
+                required_approving_review_count: 1,
+                dismiss_stale_reviews_on_push: false,
+                require_code_owner_review: false,
+                require_last_push_approval: false,
+                required_review_thread_resolution: false,
+                allowed_merge_methods: ['merge', 'squash', 'rebase'],
+                required_reviewers: [
+                  {
+                    minimum_approvals: 1,
+                    file_patterns: ['*.js'],
+                    reviewer: {
+                      id: 11721733,
+                      type: 'Team'
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ])
+
+      // GitHub state after manual removal of required_reviewers
+      const existingRuleset = {
+        name: 'Protect release branches',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/release/*'],
+            exclude: []
+          }
+        },
+        rules: [
+          {
+            type: 'pull_request',
+            parameters: {
+              required_approving_review_count: 1,
+              dismiss_stale_reviews_on_push: false,
+              require_code_owner_review: false,
+              require_last_push_approval: false,
+              required_review_thread_resolution: false,
+              allowed_merge_methods: ['merge', 'squash', 'rebase'],
+              required_reviewers: [] // Empty after manual removal
+            }
+          }
+        ]
+      }
+
+      // YAML config (what safe-settings expects)
+      const attrs = plugin.rulesets[0]
+
+      // The changed() method should detect this difference
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when bypass_actors array changes from populated to empty', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Main protection',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          bypass_actors: [
+            {
+              actor_type: 'OrganizationAdmin',
+              bypass_mode: 'always'
+            }
+          ],
+          rules: [
+            {
+              type: 'creation'
+            }
+          ]
+        }
+      ])
+
+      // GitHub state after manual removal of bypass_actors
+      const existingRuleset = {
+        name: 'Main protection',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        bypass_actors: [], // Empty after manual removal
+        rules: [
+          {
+            type: 'creation'
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when workflows array changes from populated to empty', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Workflow protection',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          rules: [
+            {
+              type: 'workflows',
+              parameters: {
+                do_not_enforce_on_create: false,
+                workflows: [
+                  {
+                    path: '.github/workflows/test.yml',
+                    repository_id: 123456
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ])
+
+      // GitHub state after manual removal of workflows
+      const existingRuleset = {
+        name: 'Workflow protection',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        rules: [
+          {
+            type: 'workflows',
+            parameters: {
+              do_not_enforce_on_create: false,
+              workflows: [] // Empty after manual removal
+            }
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when rules array has item added out-of-band', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Branch rules',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          rules: [
+            {
+              type: 'creation'
+            }
+          ]
+        }
+      ])
+
+      // GitHub state where an extra rule was added manually
+      const existingRuleset = {
+        name: 'Branch rules',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        rules: [
+          {
+            type: 'creation'
+          },
+          {
+            type: 'deletion' // Extra rule added out-of-band
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when required_reviewers item is modified with different file patterns', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Code review',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          rules: [
+            {
+              type: 'pull_request',
+              parameters: {
+                required_approving_review_count: 1,
+                dismiss_stale_reviews_on_push: false,
+                require_code_owner_review: false,
+                require_last_push_approval: false,
+                required_review_thread_resolution: false,
+                allowed_merge_methods: ['merge'],
+                required_reviewers: [
+                  {
+                    minimum_approvals: 1,
+                    file_patterns: ['*.js', '*.ts'],
+                    reviewer: {
+                      id: 999,
+                      type: 'Team'
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ])
+
+      // GitHub state where file patterns were manually changed
+      const existingRuleset = {
+        name: 'Code review',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        rules: [
+          {
+            type: 'pull_request',
+            parameters: {
+              required_approving_review_count: 1,
+              dismiss_stale_reviews_on_push: false,
+              require_code_owner_review: false,
+              require_last_push_approval: false,
+              required_review_thread_resolution: false,
+              allowed_merge_methods: ['merge'],
+              required_reviewers: [
+                {
+                  minimum_approvals: 1,
+                  file_patterns: ['*.py'], // Different patterns
+                  reviewer: {
+                    id: 999,
+                    type: 'Team'
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+
+    it('detects when bypass_actors item is modified with different bypass_mode', () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+
+      const plugin = configure([
+        {
+          name: 'Bypass config',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: {
+            ref_name: {
+              include: ['refs/heads/main'],
+              exclude: []
+            }
+          },
+          bypass_actors: [
+            {
+              actor_type: 'OrganizationAdmin',
+              bypass_mode: 'always'
+            }
+          ],
+          rules: [
+            {
+              type: 'creation'
+            }
+          ]
+        }
+      ])
+
+      // GitHub state where bypass_mode was manually changed
+      const existingRuleset = {
+        name: 'Bypass config',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: {
+          ref_name: {
+            include: ['refs/heads/main'],
+            exclude: []
+          }
+        },
+        bypass_actors: [
+          {
+            actor_type: 'OrganizationAdmin',
+            bypass_mode: 'pull_request' // Changed from 'always'
+          }
+        ],
+        rules: [
+          {
+            type: 'creation'
+          }
+        ]
+      }
+
+      const attrs = plugin.rulesets[0]
+      const result = plugin.changed(existingRuleset, attrs)
+      expect(result).toBe(true)
+    })
+  })
+
+  describe('name to id resolution', () => {
+    function bypassRuleset (actorEntry) {
+      return {
+        name: 'Main protection',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: { ref_name: { include: ['refs/heads/main'], exclude: [] } },
+        bypass_actors: [Object.assign({ bypass_mode: 'always' }, actorEntry)],
+        rules: [{ type: 'creation' }]
+      }
+    }
+
+    function reviewerRuleset (reviewer) {
+      return {
+        name: 'Code review',
+        target: 'branch',
+        enforcement: 'active',
+        conditions: { ref_name: { include: ['refs/heads/main'], exclude: [] } },
+        rules: [
+          {
+            type: 'pull_request',
+            parameters: {
+              required_approving_review_count: 1,
+              dismiss_stale_reviews_on_push: false,
+              require_code_owner_review: false,
+              require_last_push_approval: false,
+              required_review_thread_resolution: false,
+              required_reviewers: [
+                { minimum_approvals: 1, file_patterns: ['*.js'], reviewer }
+              ]
+            }
+          }
+        ]
+      }
+    }
+
+    it('resolves a Team bypass actor name to actor_id and strips the alias', async () => {
+      github.teams = { getByName: jest.fn().mockResolvedValue({ data: { id: 42 } }) }
+      const plugin = configure([bypassRuleset({ name: 'my-team', actor_type: 'Team' })], 'org')
+
+      await plugin.resolveNamesToIds()
+
+      expect(github.teams.getByName).toHaveBeenCalledWith({ org: 'jitran', team_slug: 'my-team' })
+      expect(plugin.rulesets[0].bypass_actors[0]).toEqual({ actor_id: 42, actor_type: 'Team', bypass_mode: 'always' })
+      expect(plugin.rulesets[0].bypass_actors[0].name).toBeUndefined()
+    })
+
+    it('resolves a User bypass actor login to actor_id', async () => {
+      github.request = jest.fn().mockResolvedValue({ data: { id: 7 } })
+      const plugin = configure([bypassRuleset({ name: 'octocat', actor_type: 'User' })], 'org')
+
+      await plugin.resolveNamesToIds()
+
+      expect(github.request).toHaveBeenCalledWith('GET /users/{username}', { username: 'octocat' })
+      expect(plugin.rulesets[0].bypass_actors[0]).toEqual({ actor_id: 7, actor_type: 'User', bypass_mode: 'always' })
+    })
+
+    it('resolves an Integration (GitHub App) slug to actor_id', async () => {
+      github.request = jest.fn().mockResolvedValue({ data: { id: 99 } })
+      const plugin = configure([bypassRuleset({ name: 'my-app', actor_type: 'Integration' })], 'org')
+
+      await plugin.resolveNamesToIds()
+
+      expect(github.request).toHaveBeenCalledWith('GET /apps/{app_slug}', { app_slug: 'my-app' })
+      expect(plugin.rulesets[0].bypass_actors[0].actor_id).toBe(99)
+    })
+
+    it('resolves built-in RepositoryRole names from the static map without an API call', async () => {
+      github.request = jest.fn()
+      const plugin = configure([
+        bypassRuleset({ name: 'admin', actor_type: 'RepositoryRole' })
+      ], 'org')
+
+      await plugin.resolveNamesToIds()
+
+      expect(github.request).not.toHaveBeenCalled()
+      expect(plugin.rulesets[0].bypass_actors[0].actor_id).toBe(5)
+    })
+
+    it('pins the built-in RepositoryRole ids', async () => {
+      const expected = { read: 1, triage: 2, write: 3, maintain: 4, admin: 5 }
+      for (const [name, id] of Object.entries(expected)) {
+        const plugin = configure([bypassRuleset({ name, actor_type: 'RepositoryRole' })], 'org')
+        await plugin.resolveNamesToIds()
+        expect(plugin.rulesets[0].bypass_actors[0].actor_id).toBe(id)
+      }
+    })
+
+    it('resolves a custom RepositoryRole name via the custom-repository-roles API', async () => {
+      github.request = jest.fn().mockResolvedValue({ data: { custom_roles: [{ id: 123, name: 'Security' }] } })
+      const plugin = configure([bypassRuleset({ name: 'Security', actor_type: 'RepositoryRole' })], 'org')
+
+      await plugin.resolveNamesToIds()
+
+      expect(github.request).toHaveBeenCalledWith('GET /orgs/{org}/custom-repository-roles', { org: 'jitran' })
+      expect(plugin.rulesets[0].bypass_actors[0].actor_id).toBe(123)
+    })
+
+    it('resolves a reviewer slug to id and strips the alias', async () => {
+      github.teams = { getByName: jest.fn().mockResolvedValue({ data: { id: 555 } }) }
+      const plugin = configure([reviewerRuleset({ slug: 'reviewers', type: 'Team' })], 'org')
+
+      await plugin.resolveNamesToIds()
+
+      const reviewer = plugin.rulesets[0].rules[0].parameters.required_reviewers[0].reviewer
+      expect(github.teams.getByName).toHaveBeenCalledWith({ org: 'jitran', team_slug: 'reviewers' })
+      expect(reviewer).toEqual({ id: 555, type: 'Team' })
+      expect(reviewer.slug).toBeUndefined()
+    })
+
+    it('caches repeated lookups so each name resolves with a single API call', async () => {
+      github.teams = { getByName: jest.fn().mockResolvedValue({ data: { id: 42 } }) }
+      const plugin = configure([
+        {
+          name: 'Multi',
+          target: 'branch',
+          enforcement: 'active',
+          conditions: { ref_name: { include: ['refs/heads/main'], exclude: [] } },
+          bypass_actors: [
+            { name: 'my-team', actor_type: 'Team', bypass_mode: 'always' },
+            { name: 'my-team', actor_type: 'Team', bypass_mode: 'pull_request' }
+          ],
+          rules: [{ type: 'creation' }]
+        }
+      ], 'org')
+
+      await plugin.resolveNamesToIds()
+
+      expect(github.teams.getByName).toHaveBeenCalledTimes(1)
+      expect(plugin.rulesets[0].bypass_actors.map(a => a.actor_id)).toEqual([42, 42])
+    })
+
+    it('leaves numeric actor_id untouched and makes no lookup (backward compatible)', async () => {
+      github.teams = { getByName: jest.fn() }
+      github.request = jest.fn()
+      const plugin = configure([bypassRuleset({ actor_id: 234, actor_type: 'Team' })], 'org')
+
+      await plugin.resolveNamesToIds()
+
+      expect(github.teams.getByName).not.toHaveBeenCalled()
+      expect(github.request).not.toHaveBeenCalled()
+      expect(plugin.rulesets[0].bypass_actors[0]).toEqual({ actor_id: 234, actor_type: 'Team', bypass_mode: 'always' })
+    })
+
+    it('throws when both name and actor_id are provided', async () => {
+      const plugin = configure([bypassRuleset({ name: 'my-team', actor_id: 1, actor_type: 'Team' })], 'org')
+      await expect(plugin.resolveNamesToIds()).rejects.toThrow(/both 'name'.*and 'actor_id'/)
+    })
+
+    it('throws when both reviewer slug and id are provided', async () => {
+      const plugin = configure([reviewerRuleset({ slug: 'reviewers', id: 1, type: 'Team' })], 'org')
+      await expect(plugin.resolveNamesToIds()).rejects.toThrow(/both 'slug'.*and 'id'/)
+    })
+
+    it('throws when an actor_type does not support name resolution', async () => {
+      const plugin = configure([bypassRuleset({ name: 'whoever', actor_type: 'DeployKey' })], 'org')
+      await expect(plugin.resolveNamesToIds()).rejects.toThrow(/only supported for Team, User, Integration, and RepositoryRole/)
+    })
+
+    it('throws a clear error when a team slug cannot be resolved', async () => {
+      const notFound = new Error('Not Found')
+      notFound.status = 404
+      github.teams = { getByName: jest.fn().mockRejectedValue(notFound) }
+      const plugin = configure([bypassRuleset({ name: 'ghost-team', actor_type: 'Team' })], 'org')
+      await expect(plugin.resolveNamesToIds()).rejects.toThrow(/Unable to resolve Team slug 'ghost-team'/)
+    })
+
+    it('sync sends the resolved actor_id to the API', async () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+      github.teams = { getByName: jest.fn().mockResolvedValue({ data: { id: 42 } }) }
+      const postCalls = []
+      github.request = jest.fn().mockImplementation((route, body) => {
+        if (route.startsWith('POST')) postCalls.push({ route, body })
+        return Promise.resolve('request')
+      })
+      github.request.endpoint = jest.fn().mockImplementation((route, body) => ({ url: route, body }))
+      github.request.endpoint.merge = jest.fn().mockReturnValue({ method: 'GET', url: '/orgs/jitran/rulesets', headers: version })
+
+      const plugin = configure([bypassRuleset({ name: 'my-team', actor_type: 'Team' })], 'org')
+      await plugin.sync()
+
+      expect(postCalls).toHaveLength(1)
+      expect(postCalls[0].route).toBe('POST /orgs/{org}/rulesets')
+      expect(postCalls[0].body.bypass_actors).toEqual([{ actor_id: 42, actor_type: 'Team', bypass_mode: 'always' }])
+    })
+
+    it('sync surfaces a resolution failure as an error in nop mode', async () => {
+      github.paginate = jest.fn().mockResolvedValue([])
+      const plugin = configure([bypassRuleset({ name: 'my-team', actor_id: 1, actor_type: 'Team' })], 'org', true)
+
+      const result = await plugin.sync()
+      const flat = result.flat()
+      expect(flat.some(command => command.type === 'ERROR')).toBe(true)
     })
   })
 })

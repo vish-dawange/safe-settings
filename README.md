@@ -13,7 +13,7 @@
 
    > It is possible specify a custom repo instead of the `admin` repo with `ADMIN_REPO`. See [Environment variables](#environment-variables) for more details.
 
-1. The **settings** in the **default** branch are applied. If the settings are changed on a non-default branch and a PR is created to merge the changes, the app runs in a `dry-run` mode to evaluate and validate the changes. Checks pass or fail based on the `dry-run` results.
+1. The **settings** in the **default** branch are applied. If the settings are changed on a non-default branch and a PR is created to merge the changes, the app runs in a `dry-run` mode to evaluate and validate the changes. Checks pass or fail based on the `dry-run` results. The dry-run compares the PR's config against the **base branch** config, so the check run and PR comment report only the changes the PR itself introduces (see [Dry-run PR comment](#dry-run-pr-comment)).
 
 1. In `safe-settings` the settings can have 2 types of targets:
    1. `org` - These settings are applied to the organization. `Org`-targeted settings are defined in `.github/settings.yml`. Currently, only `rulesets` are supported as `org`-targeted settings.
@@ -168,7 +168,7 @@ The App listens to the following webhook events:
 
 - **repository.renamed**: If a repository is renamed, the default behavior is safe-settings will ignore this (for backward-compatibility). If `BLOCK_REPO_RENAME_BY_HUMAN` env variable is set to true, `safe-settings` will revert the repo to the previous name unless it is renamed using a `bot`. If it is renamed using a `bot`, it will try to copy the existing `<old-repo>.yml` to `<new-repo>.yml` so that the repo config yml stays consistent. If a <new-repo.yml> file already exists, it doesn't create a new one.
 
-- **pull_request.opened**, **pull_request.reopened**, **check_suite.requested**: If the settings are changed, but it is not in the `default` branch, and there is an existing PR, the code will validate the settings changes by running safe-settings in `nop` mode and update the PR with the `dry-run` status.
+- **pull_request.opened**, **pull_request.reopened**, **check_suite.requested**: If the settings are changed, but it is not in the `default` branch, and there is an existing PR, the code will validate the settings changes by running safe-settings in `nop` mode and update the PR with the `dry-run` status. The run loads the base-branch config and filters the results so only the changes the PR introduces are reported (see [Dry-run PR comment](#dry-run-pr-comment)).
 
 - **repository_ruleset**: If the `ruleset` settings are modified in the UI manually, `safe-settings` will `sync` the settings to prevent any unauthorized changes.
 
@@ -178,6 +178,21 @@ The App listens to the following webhook events:
 
 - __custom_property_values__: If new repository properties are set for a repository, `safe-settings` will run to so that if a sub-org config is defined by that property, it will be applied for the repo
 
+- **repository_dispatch** (`event_type: safe-settings-generate`): Triggers the **settings generator**, which reads the current configuration of a repo/org/suborg and opens a PR against the `admin` repo with the generated YAML. See [Generating settings from existing configuration](#generating-settings-from-existing-configuration).
+
+### Dry-run PR comment
+
+When a config change is proposed in a PR (a non-default branch), `safe-settings` runs in `nop` (no-operation) `dry-run` mode and posts a comment summarizing what *would* change if the PR were merged. The results are filtered against the **base branch** config, so the comment reports only the changes the PR introduces — not the full diff against live GitHub settings.
+
+The comment contains:
+
+- A header with the run timestamp, the **number of repos considered**, and the **number of repos affected**.
+- **Breakdown of changes** — a collapsible section, grouped by plugin/repo, showing field-level diffs. Each entry is marked as an addition, modification, or deletion, with the before/after values for modified fields. When there are no changes, it shows `No changes to apply.`
+- **Breakdown of errors** — a collapsible section listing any errors by repo, or `None` when there are none. The check run is marked as failed when errors are present.
+- **Informational messages** — a collapsible section listing non-error notices such as plugins skipped via [`disable_plugins`](#disabling-plugins-disable_plugins) or deletions suppressed by `additive_plugins`, so reviewers can see which settings were intentionally not applied.
+
+For very large diffs the comment is split across multiple comments, and the check-run summary is truncated with a notice when it exceeds the size limit.
+
 ### Suborg re-evaluation after repo-level changes
 
 A repo's suborg membership can depend on state that is itself written by `safe-settings`:
@@ -186,18 +201,18 @@ A repo's suborg membership can depend on state that is itself written by `safe-s
 - `suborgproperties` — repos belong to a suborg because a custom property has a given value
 - `suborgrepos` — repos belong to a suborg because their name matches a glob
 
-When a repo-level change (a push to `.github/repos/<repo>.yml`, or a `repository.created` event for a brand-new repo) adds a team, sets a custom property, or creates a repo whose name matches a suborg's `suborgrepos` glob, the repo may *newly* match a suborg config that was not applied in the first pass.
+When a repo-level change (a push to `.github/repos/<repo>.yml`, or a `repository.created` event for a brand-new repo) adds, removes, or changes a team or custom property, the repo may start or stop matching a suborg config. A new repo may also start matching a suborg because its name matches a `suborgrepos` glob.
 
-To handle this, after applying a repo-yml change `safe-settings` re-evaluates the repo's suborg membership and, if a new suborg now matches, runs the repo through the apply pipeline a second time so the suborg's settings are picked up in the same sync.
+To handle this, after applying a repo-yml change `safe-settings` re-evaluates the repo's suborg membership. If the matched suborg source set changed, it runs the repo through the apply pipeline a second time so newly matched suborg settings are applied and settings from a no-longer-matching suborg can be removed in the same sync.
 
 **Scope:** Re-evaluation runs only on the repo-yml change paths (`Settings.sync` and the per-repo loop of `Settings.syncSelectedRepos`). Global settings changes (`syncAll`) and suborg-yml changes (`syncSubOrgs`) already iterate all relevant repos and do not need it.
 
 **Loop prevention.** Two guards prevent infinite re-evaluation:
 
-1. **Stability check (primary):** Before applying changes, `safe-settings` snapshots the set of suborg source paths that match the repo. After applying, it refreshes the suborg cache and recomputes the set. If no new suborg source appeared, re-evaluation stops.
-2. **Hard depth cap (safety net):** Each repo is re-evaluated at most `MAX_REEVALUATION_DEPTH = 1` time per sync. This resolves the dominant single-hop case (repo change → newly-matched suborg → apply suborg once) while preventing pathological chains (suborg A applies a team that activates suborg B that activates suborg C…). Chains beyond one hop are resolved on the next sync event, and a warning is logged when the cap is hit.
+1. **Stability check (primary):** Before applying changes, `safe-settings` snapshots the set of suborg source paths that match the repo. After applying, it refreshes the suborg cache and recomputes the set. If the set did not change, re-evaluation stops. If a source appeared or disappeared, the repo is processed once more.
+2. **Hard depth cap (safety net):** Each repo is re-evaluated at most `MAX_REEVALUATION_DEPTH = 1` time per sync. This resolves the dominant single-hop case (repo change → suborg membership changed → apply the corrected suborg overlay once) while preventing pathological chains (suborg A applies a team that activates suborg B that activates suborg C…). Chains beyond one hop are resolved on the next sync event, and a warning is logged when the cap is hit.
 
-**Trigger optimization.** Re-evaluation is skipped entirely when the resolved `repoConfig` has no `teams`, no `custom_properties`, and is not a rename — these are the only repo-level changes that can affect suborg matching.
+**Trigger optimization.** Re-evaluation is skipped entirely when the applied repo change did not affect `teams`, `custom_properties`, repository creation, or repository rename state — these are the repo-level changes that can affect suborg matching.
 
 ### Use `safe-settings` to rename repos
 If you rename a `<repo.yml>` that corresponds to a repo, safe-settings will rename the repo to the new name. This behavior will take effect whether the env variable `BLOCK_REPO_RENAME_BY_HUMAN` is set or not.
@@ -321,6 +336,60 @@ Notes:
 
 > ⚠️ **Warning:**
 When `{{EXTERNALLY_DEFINED}}` is removed from an existing branch protection rule or ruleset configuration, the status checks in the existing rules in GitHub will revert to the checks that are defined in safe-settings. From this point onwards, all status checks configured through the GitHub UI will be reverted back to the safe-settings configuration.
+
+#### Referencing ruleset bypass actors and reviewers by name
+
+Rulesets normally require numeric ids for `bypass_actors[].actor_id` and for the
+team in `required_reviewers[].reviewer.id`. To avoid looking these ids up, you
+can reference them by name and safe-settings resolves them to the correct id
+before applying the ruleset:
+
+- `bypass_actors[].name` — an alternative to `actor_id`. The value is resolved
+  based on `actor_type`:
+  - `Team` → team slug
+  - `User` → username
+  - `Integration` → GitHub App slug
+  - `RepositoryRole` → role name. Built-in roles (`read`, `triage`, `write`,
+    `maintain`, `admin`) are mapped automatically; any other name is looked up
+    among the organization's custom repository roles.
+- `required_reviewers[].reviewer.slug` — an alternative to `reviewer.id`, the
+  slug of the reviewing team.
+
+```yaml
+rulesets:
+  - name: Main protection
+    target: branch
+    enforcement: active
+    bypass_actors:
+      - name: my-team         # resolved to actor_id
+        actor_type: Team
+        bypass_mode: always
+      - name: admin           # built-in repository role
+        actor_type: RepositoryRole
+        bypass_mode: always
+    rules:
+      - type: pull_request
+        parameters:
+          required_approving_review_count: 1
+          dismiss_stale_reviews_on_push: false
+          require_code_owner_review: false
+          require_last_push_approval: false
+          required_review_thread_resolution: false
+          required_reviewers:
+            - minimum_approvals: 1
+              file_patterns: ["*.js"]
+              reviewer:
+                slug: my-reviewers-team   # resolved to reviewer.id
+                type: Team
+```
+
+Notes:
+  - This is fully backward compatible. Existing policies that use `actor_id` /
+    `reviewer.id` continue to work unchanged, and numeric ids are never looked up.
+  - Provide either the name (`name` / `slug`) or the id (`actor_id` /
+    `reviewer.id`) for a given entry, not both. Specifying both is an error.
+  - If a name cannot be resolved to an id, the ruleset sync fails with a clear
+    error so the misconfiguration is surfaced rather than silently ignored.
 
 #### Status checks inheritance across scopes
 Refer to [Status checks](docs/status-checks.md).
@@ -548,6 +617,50 @@ disable_plugins:
     target: all
 ```
 
+### Additive plugins (`additive_plugins`)
+
+`additive_plugins` is the complementary "soft mode" to `disable_plugins`. When a
+Diffable plugin is listed here, safe-settings will only **add** and **update**
+entries — it will **never call `remove()`**. Items that exist on GitHub but are
+absent from the YAML are preserved, effectively merging external changes with
+your policy rather than overwriting them.
+
+Declare `additive_plugins` only in `settings.yml` (org level) to keep behaviour
+consistent across all repositories.
+
+**Supported plugins** (all extend `Diffable`):
+
+| Plugin | Effect in additive mode |
+|--------|------------------------|
+| `labels` | Extra labels not in YAML are kept |
+| `collaborators` | Extra collaborators not in YAML are kept |
+| `teams` | Extra team permissions not in YAML are kept |
+| `milestones` | Extra milestones not in YAML are kept |
+| `autolinks` | Extra autolinks not in YAML are kept |
+| `environments` | Extra environments not in YAML are kept |
+| `custom_properties` | Extra property values not in YAML are kept |
+| `variables` | Extra variables not in YAML are kept |
+| `rulesets` | Extra rulesets not in YAML are kept |
+| `custom_repository_roles` | Extra custom roles not in YAML are kept |
+
+> [!important]
+> `repository`, `archive`, `branches`, and `validator` are **not** supported.
+> Listing them in `additive_plugins` will produce a validation error.
+
+**NOP mode**: when `additive_plugins` is active and the diff would produce
+deletions, an informational message — *"Additive mode active: N deletion(s)
+suppressed by additive_plugins"* — is included in the PR check-run comment so
+reviewers can see what is being preserved.
+
+**Example** — never delete labels or collaborators that were added outside of
+safe-settings:
+
+```yaml
+additive_plugins:
+  - labels
+  - collaborators
+```
+
 ### The Settings Files
 
 The settings files can be used to set the policies at the `org`, `suborg` or `repo` level.
@@ -706,14 +819,37 @@ Add the following to your `.env` file:
 ### Running
 
 ```bash
+# Run all phases
 npm run smoke-test
 # or
 node smoke-test.js
+
+# Interactive mode — pause after each phase for manual validation
+npm run smoke-test:interactive
+# or
+node smoke-test.js --interactive
+
+# Run a single phase (with setup + teardown)
+npm run smoke-test:phase -- 3
+# or
+node smoke-test.js --phase 3
+
+# Run a range of phases
+npm run smoke-test:phase -- 1-3
+node smoke-test.js --phase 1-3
+
+# Run specific comma-separated phases
+npm run smoke-test:phase -- 1,3,5
+node smoke-test.js --phase 1,3,5
+
+# Mix range + interactive
+npm run smoke-test:phase -- 1-3 interactive
+node smoke-test.js --phase 1-3 --interactive
 ```
 
 ### What it tests
 
-The smoke test runs 9 phases:
+The smoke test runs the following phases:
 
 | Phase | Description |
 |---|---|
@@ -722,10 +858,15 @@ The smoke test runs 9 phases:
 | **Phase 2** | Removes a team from the repo and verifies safe-settings re-adds it (drift remediation) |
 | **Phase 3** | Creates a rogue ruleset and verifies safe-settings removes it (drift remediation) |
 | **Phase 4** | Creates `demo-repo-service1` with teams, topics, and branch protection |
-| **Phase 5** | Creates a suborg config and verifies org-scoped rulesets are applied to matching repos |
+| **Phase 5** | Creates a property-targeted suborg config, verifies suborg rulesets apply to two matching repos, then changes one repo's custom property and verifies the ruleset is removed only from the repo that no longer matches |
 | **Phase 6** | Archives `demo-repo-service1` and verifies the repo is archived |
 | **Phase 7** | Creates `demo-repo-service2` and verifies suborg rulesets are inherited |
+| **Phase 7b** | Tests external group team sync |
 | **Phase 8** | Creates org-level settings (custom repository roles + org rulesets) and verifies they are applied |
+| **Phase 10** | Validates `disable_plugins` — ensures disabled plugins are skipped |
+| **Phase 11** | Validates `additive_plugins` — verifies additive-mode plugin behaviour |
+| **Phase 12** | Tests `custom_properties` plugin |
+| **Phase 13** | Tests the `variables` plugin (create, update, remove variables) |
 | **Teardown** | Shuts down safe-settings, deletes test repos, teams, custom roles, and rulesets |
 
 ### Output
@@ -737,6 +878,120 @@ The script uses colored terminal output with pass (✅) / fail (❌) indicators 
   Results: 45 passed, 0 failed
 ══════════════════════════════════════
 ```
+
+
+## Generating settings from existing configuration
+
+Safe-settings normally works "forward": you declare settings in YAML and it applies them to GitHub. The **settings generator** does the reverse — it reads the *current* state of a repo, an org, or a collection of repos (a suborg) and produces the corresponding safe-settings YAML (`repos/<name>.yml`, `settings.yml`, or `suborgs/<name>.yml`). This is useful for onboarding existing repositories/orgs onto safe-settings without hand-authoring config.
+
+It can be invoked two ways:
+
+- **Standalone CLI** (`generate-settings.js`) — writes the generated file to your local filesystem.
+- **App trigger** via a `repository_dispatch` event — the running app generates the file and opens a **pull request** against the admin repo.
+
+### Source types
+
+| `source_type` | `source_value` | What is extracted | Output file |
+|---|---|---|---|
+| `repo` | repository name | All repo-level plugins (repository, labels, collaborators, teams, milestones, branches, autolinks, custom_properties, variables, environments, repo rulesets) | `repos/<repo>.yml` |
+| `org` | org login | Org-level rulesets and custom repository roles only | `settings.yml` |
+| `custom-property` | `name=value` (e.g. `Team=backend`) | Repo-level settings **common to all repos** carrying that custom property value (intersection) | `suborgs/<name>_<value>.yml` |
+
+> **Note on suborgs:** for `custom-property`, the generator discovers every repo with the given custom property value, extracts each repo's config, and keeps only the settings that are **identical across all of them**. A `suborgproperties` selector is prepended automatically.
+
+### Overwrite behavior
+
+By default (`overwrite=false`) the generator will **not** replace an existing file. If the target already exists it writes a `<name>.sample.yml` file next to it instead. Set `overwrite=true` to replace the file.
+
+### Standalone invocation
+
+The CLI loads variables from a `.env` file in the project root (`APP_ID`, `PRIVATE_KEY`, and optionally `GH_ORG`/`OWNER`). Options can be passed as flags or environment variables.
+
+```bash
+# Generate repos/my-repo.yml from a single repository
+node generate-settings.js \
+  --source-type repo \
+  --source-value my-repo \
+  --owner my-org \
+  --output-dir ./out
+
+# Generate settings.yml from org-level rulesets + custom repository roles
+node generate-settings.js --source-type org --source-value my-org --output-dir ./out
+
+# Generate suborgs/Team_backend.yml from all repos with the custom property Team=backend
+node generate-settings.js \
+  --source-type custom-property \
+  --source-value "Team=backend" \
+  --owner my-org \
+  --output-dir ./out
+
+# Overwrite an existing file instead of writing a .sample.yml
+node generate-settings.js --source-type repo --source-value my-repo --owner my-org --overwrite
+
+# Using environment variables instead of flags
+SOURCE_TYPE=repo SOURCE_VALUE=my-repo OWNER=my-org OUTPUT_DIR=./out node generate-settings.js
+```
+
+| Flag | Env var | Description | Default |
+|---|---|---|---|
+| `--source-type` | `SOURCE_TYPE` | `repo`, `org`, or `custom-property` | (required) |
+| `--source-value` | `SOURCE_VALUE` | repo name / org login / `name=value` | (required) |
+| `--property-name` | `SOURCE_PROPERTY_NAME` | Custom property name (alternative to encoding it in `--source-value`) | — |
+| `--owner` | `OWNER` / `GITHUB_ORG` / `GH_ORG` | Org login (selects the matching App installation) | first installation |
+| `--output-dir` | `OUTPUT_DIR` | Directory to write generated files into | `.` |
+| `--overwrite` | `OVERWRITE=true` | Replace existing files instead of writing `.sample.yml` | `false` |
+
+### App invocation (`repository_dispatch`)
+
+When the app is running, trigger generation by sending a `repository_dispatch` event (with `event_type: safe-settings-generate`) to the **admin repo**. The app generates the file and opens a PR against the admin repo's default branch.
+
+```bash
+# Generate a repo config and open a PR
+gh api --method POST \
+  /repos/my-org/admin/dispatches \
+  -f event_type=safe-settings-generate \
+  -F 'client_payload[source_type]=repo' \
+  -F 'client_payload[source_value]=my-repo' \
+  -F 'client_payload[overwrite]=false'
+
+# Generate org-level settings.yml and open a PR
+gh api --method POST \
+  /repos/my-org/admin/dispatches \
+  -f event_type=safe-settings-generate \
+  -F 'client_payload[source_type]=org' \
+  -F 'client_payload[source_value]=my-org'
+
+# Generate a suborg config from a custom property
+gh api --method POST \
+  /repos/my-org/admin/dispatches \
+  -f event_type=safe-settings-generate \
+  -F 'client_payload[source_type]=custom-property' \
+  -F 'client_payload[source_value]=Team=backend' \
+  -F 'client_payload[overwrite]=false'
+```
+
+The `client_payload` fields are:
+
+| Field | Description | Required |
+|---|---|---|
+| `source_type` | `repo`, `org`, or `custom-property` | Yes |
+| `source_value` | repo name / org login / `name=value` | Yes |
+| `property_name` | Custom property name (alternative to encoding it in `source_value`) | No |
+| `overwrite` | `true` to replace an existing file; otherwise a `.sample.yml` is created | No (default `false`) |
+
+> **Tip:** Always review the generated PR before merging. Running safe-settings in NOP mode against the generated config should report no unexpected diffs.
+
+#### Generated changes always go through a pull request
+
+The app **never** commits generated configuration directly to the admin repo's default branch. Every `repository_dispatch` invocation produces a pull request that must be reviewed and merged before it takes effect. Concretely, for each request the app:
+
+1. Creates a **new branch** off the admin repo's default branch (`safe-settings-generate/<source_type>-<source_value>-<timestamp>`).
+2. Commits the generated YAML **to that branch only**.
+3. Opens a **pull request** from that branch against the default branch.
+
+This means it is safe to give developers write access to the admin repo so they can trigger generation: a `repository_dispatch` event can only create a branch and open a PR — it cannot change the live configuration on its own. The generated config does not reach the path safe-settings acts on until the PR is merged, so all changes are subject to your normal review process and any branch protection / required-reviews rules configured on the admin repo's default branch.
+
+To enforce review, protect the admin repo's default branch (for example, require pull request reviews and disallow direct pushes). Because the generator only ever writes to a feature branch and opens a PR, those rules apply to every generated change.
 
 
 ## License

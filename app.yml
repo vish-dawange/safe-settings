@@ -22,9 +22,9 @@ default_events:
   - pull_request
   - push
   - repository
+  - repository_dispatch
   - repository_ruleset
   - team
-
 
 # The set of permissions needed by the GitHub App. The format of the object uses
 # the permission name for the key (for example, issues) and the access type for
@@ -113,6 +113,14 @@ default_permissions:
     # Get notified of, and update, content references.
     # https://developer.github.com/v3/apps/permissions/
     organization_administration: write
+
+    # Manage custom organization roles.
+    # https://docs.github.com/en/enterprise-cloud@latest/rest/authentication/permissions-required-for-github-apps?apiVersion=2026-03-10#organization-permissions-for-custom-organization-roles
+    organization_custom_org_roles: write
+
+    # Manage custom repository roles.
+    # https://docs.github.com/en/enterprise-cloud@latest/rest/authentication/permissions-required-for-github-apps?apiVersion=2026-03-10#organization-permissions-for-custom-repository-roles
+    organization_custom_roles: write
 
     # Manage Actions variables.
     # https://docs.github.com/en/rest/actions/variables?apiVersion=2022-11-28

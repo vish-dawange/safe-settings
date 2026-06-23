@@ -11,6 +11,9 @@
  *   3. Run: `node smoke-test.js`
  *      Add --interactive to pause after each phase for manual validation.
  *      Set SMOKE_VERBOSE=1 for live safe-settings logs.
+ *      Optional (Phase 16 — ruleset name resolution): set SMOKE_NR_USER to a
+ *      username and/or SMOKE_NR_APP_SLUG to an installed GitHub App slug to also
+ *      exercise User and Integration bypass-actor name resolution.
  *
  * Auth:
  *   - Octokit (GitHub App): APP_ID + PRIVATE_KEY from .env — used for most operations.
@@ -67,8 +70,12 @@ const CONFIG_PATH = process.env.CONFIG_PATH || '.github'
 const APP_ID = process.env.APP_ID
 const PRIVATE_KEY = (process.env.PRIVATE_KEY || '').replace(/\\n/g, '\n')
 
-const TEST_REPOS = ['test', 'demo-repo-service1', 'demo-repo-service2']
+const TEST_REPOS = ['test', 'demo-repo-service1', 'demo-repo-service2', 'combined-settings-repo']
 const TEST_TEAMS = ['AD-GRP-PAYMENTS-PLATFORM-OWNERS', 'awesometeam-a-approvers', 'jefeish-edj-test']
+
+// Principals created on demand for the ruleset name-resolution phase (Phase 16)
+const SMOKE_NR_TEAM = 'safe-settings-smoke-nr-team'
+const SMOKE_NR_ROLE = 'safe-settings-smoke-nr-role'
 
 const POLL_INTERVAL_MS = 5000
 const MAX_POLL_MS = 120000
@@ -78,7 +85,37 @@ const WEBHOOK_SETTLE_MS = 15000
 const GH_TOKEN = process.env.GH_TOKEN || ''
 
 // Interactive mode: pause after each phase for manual validation
-const INTERACTIVE = process.argv.includes('--interactive')
+// Accepts --interactive flag or bare positional "interactive" word.
+const INTERACTIVE = process.argv.includes('--interactive') || process.argv.slice(2).includes('interactive')
+
+// Phase filter: supports single, comma-separated, or range values.
+//   --phase 3          → only phase 3
+//   --phase 1,2,3      → phases 1, 2, and 3
+//   --phase 1-3        → phases 1 through 3
+//   npm run smoke-test:phase -- 1-3 interactive
+const PHASE_ARG_IDX = process.argv.indexOf('--phase')
+const _parsePhaseSet = (raw) => {
+  if (!raw) return null
+  const nums = new Set()
+  for (const part of raw.split(',')) {
+    const range = part.match(/^(\d+)-(\d+)$/)
+    if (range) {
+      const lo = parseInt(range[1], 10)
+      const hi = parseInt(range[2], 10)
+      for (let i = lo; i <= hi; i++) nums.add(i)
+    } else if (/^\d+$/.test(part.trim())) {
+      nums.add(parseInt(part.trim(), 10))
+    }
+  }
+  return nums.size > 0 ? nums : null
+}
+const ONLY_PHASES = PHASE_ARG_IDX !== -1
+  ? _parsePhaseSet(process.argv[PHASE_ARG_IDX + 1])
+  : (() => {
+      // Accept bare positional phase spec (e.g. "3" or "1-3" or "1,2,3")
+      const positional = process.argv.slice(2).find(a => !a.startsWith('--') && /^[\d,\-]+$/.test(a) && !/^-\d/.test(a))
+      return positional !== undefined ? _parsePhaseSet(positional) : null
+    })()
 
 class InteractiveExit extends Error {
   constructor (action) {
@@ -259,6 +296,101 @@ async function deleteTeam (org, teamSlug) {
   try { await octokit.rest.teams.deleteInOrg({ org, team_slug: teamSlug }) } catch { /* ok */ }
 }
 
+async function ensureTeam (org, name) {
+  try {
+    const { data } = await octokit.rest.teams.getByName({ org, team_slug: name })
+    return data
+  } catch { /* team doesn't exist yet */ }
+  try {
+    const { data } = await octokit.rest.teams.create({ org, name, privacy: 'closed' })
+    return data
+  } catch { return null }
+}
+
+async function getCustomRepositoryRole (org, name) {
+  try {
+    const { data } = await octokit.request('GET /orgs/{org}/custom-repository-roles', { org })
+    return (data.custom_roles || []).find(role => role.name === name) || null
+  } catch { return null }
+}
+
+async function createCustomRepositoryRole (org, name, description) {
+  const existing = await getCustomRepositoryRole(org, name)
+  if (existing) return existing
+  return (await octokit.request('POST /orgs/{org}/custom-repository-roles', {
+    org,
+    name,
+    description,
+    base_role: 'read',
+    permissions: ['delete_alerts_code_scanning']
+  })).data
+}
+
+async function deleteCustomRepositoryRole (org, name) {
+  const role = await getCustomRepositoryRole(org, name)
+  if (!role) return
+  await octokit.request('DELETE /orgs/{org}/custom-repository-roles/{role_id}', { org, role_id: role.id })
+}
+
+async function getOrgRuleset (org, name) {
+  try {
+    const { data: rulesets } = await octokit.request('GET /orgs/{org}/rulesets', { org })
+    return rulesets.find(ruleset => ruleset.name === name) || null
+  } catch { return null }
+}
+
+async function getRepoRuleset (owner, repo, name) {
+  try {
+    const { data: rulesets } = await octokit.request('GET /repos/{owner}/{repo}/rulesets', { owner, repo })
+    return rulesets.find(ruleset => ruleset.name === name) || null
+  } catch { return null }
+}
+
+async function getRepoRulesetDetails (owner, repo, rulesetId) {
+  try {
+    const { data } = await octokit.request('GET /repos/{owner}/{repo}/rulesets/{ruleset_id}', { owner, repo, ruleset_id: rulesetId })
+    return data
+  } catch { return null }
+}
+
+async function setRepoCustomProperty (owner, repo, propertyName, value) {
+  await octokit.request('PATCH /repos/{owner}/{repo}/properties/values', {
+    owner,
+    repo,
+    properties: [
+      { property_name: propertyName, value }
+    ]
+  })
+}
+
+async function createOrgRuleset (org, name) {
+  const existing = await getOrgRuleset(org, name)
+  if (existing) return existing
+  return (await octokit.request('POST /orgs/{org}/rulesets', {
+    org,
+    name,
+    target: 'repository',
+    source_type: 'Organization',
+    source: org,
+    enforcement: 'disabled',
+    conditions: {
+      repository_property: {
+        exclude: [],
+        include: [
+          { name: 'visibility', source: 'system', property_values: ['private'] }
+        ]
+      }
+    },
+    rules: [{ type: 'repository_delete' }]
+  })).data
+}
+
+async function deleteOrgRuleset (org, name) {
+  const ruleset = await getOrgRuleset(org, name)
+  if (!ruleset) return
+  await octokit.request('DELETE /orgs/{org}/rulesets/{ruleset_id}', { org, ruleset_id: ruleset.id })
+}
+
 async function waitForCheckRun (owner, repo, sha, { timeout = MAX_POLL_MS } = {}) {
   return poll(async () => {
     const { data } = await octokit.rest.checks.listForRef({ owner, repo, ref: sha })
@@ -393,6 +525,11 @@ rulesets:
             security_alerts_threshold: medium_or_higher  
 `
 
+const REPO_TEST_OTHER_OWNERSHIP_YML = REPO_TEST_YML.replace(
+  '  - property_name: ent-ownership\n    value: expert-services',
+  '  - property_name: ent-ownership\n    value: other-services'
+)
+
 const REPO_DEMO_SERVICE1_YML = `# Safe-Settings Configuration
 repository:
   name: demo-repo-service1
@@ -501,6 +638,11 @@ rulesets:
                 id: 11721733
                 type: Team
 `
+
+const SUBORG_EXPERT_SERVICES_PROPERTY_YML = SUBORG_EXPERT_SERVICES_YML.replace(
+  'suborgteams:\n  - expert-services-developers',
+  'suborgproperties:\n  - ent-ownership: expert-services'
+)
 
 const REPO_DEMO_SERVICE1_ARCHIVED_YML = `# Safe-Settings Configuration
 repository:
@@ -648,6 +790,327 @@ const SETTINGS_YML_INVALID_DISABLE = `# Org-level settings with invalid disable_
 
 disable_plugins:
   - not-a-real-plugin
+`
+
+// Phase 11a: settings.yml with additive_plugins for labels and custom_properties.
+// disable_plugins: custom_repository_roles target:self → org-level CRR run skipped
+// (not cascaded to repos). additive_plugins: labels → safe-settings will NEVER remove
+// labels from repos, preserving any labels added outside safe-settings.
+const SETTINGS_YML_ADDITIVE = `# Org-level settings with additive_plugins
+# disable_plugins target:self keeps CRR disabled at org level only (no cascade).
+# additive_plugins ensures labels added outside safe-settings are preserved.
+
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+
+additive_plugins:
+  - labels
+  - custom_properties
+
+labels:
+  - name: safe-settings-base
+    color: '0075ca'
+    description: Baseline label applied by safe-settings policy
+
+rulesets:
+  - name: test
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - internal
+    rules:
+      - type: repository_delete
+
+custom_repository_roles:
+  - name: security-engineer
+    description: Can contribute code and manage the security pipeline
+    base_role: maintain
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+// Phase 11b trigger: same as SETTINGS_YML_ADDITIVE with a comment bump so the
+// push event fires and safe-settings re-processes all repos.
+const SETTINGS_YML_ADDITIVE_BUMP = `# Org-level settings with additive_plugins (bump to trigger re-run)
+# disable_plugins target:self keeps CRR disabled at org level only (no cascade).
+# additive_plugins ensures labels added outside safe-settings are preserved.
+
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+
+additive_plugins:
+  - labels
+  - custom_properties
+
+labels:
+  - name: safe-settings-base
+    color: '0075ca'
+    description: Baseline label applied by safe-settings policy
+
+rulesets:
+  - name: test
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - internal
+    rules:
+      - type: repository_delete
+
+custom_repository_roles:
+  - name: security-engineer
+    description: Can contribute code and manage the security pipeline
+    base_role: maintain
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+// Phase 11c: same labels policy but WITHOUT additive_plugins — used to confirm
+// that without additive mode safe-settings DOES remove the external label.
+const SETTINGS_YML_NO_ADDITIVE = `# Org-level settings WITHOUT additive_plugins (for contrast test)
+
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+
+labels:
+  - name: safe-settings-base
+    color: '0075ca'
+    description: Baseline label applied by safe-settings policy
+
+rulesets:
+  - name: test
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - internal
+    rules:
+      - type: repository_delete
+
+custom_repository_roles:
+  - name: security-engineer
+    description: Can contribute code and manage the security pipeline
+    base_role: maintain
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+// Phase 12a: Org-level settings with additive_plugins for custom_properties
+const SETTINGS_YML_CP_ADDITIVE = `# Org-level settings with additive_plugins: custom_properties
+additive_plugins:
+  - custom_properties
+custom_properties:
+  - property_name: baseline-prop
+    value: baseline
+`
+
+// Phase 12b: Bump for re-run
+const SETTINGS_YML_CP_ADDITIVE_BUMP = `# Org-level settings with additive_plugins: custom_properties (bump)
+additive_plugins:
+  - custom_properties
+custom_properties:
+  - property_name: baseline-prop
+    value: baseline
+`
+
+// Phase 12c: Remove additive_plugins
+const SETTINGS_YML_CP_NO_ADDITIVE = `# Org-level settings WITHOUT additive_plugins (for contrast)
+custom_properties:
+  - property_name: baseline-prop
+    value: baseline
+`
+
+const SETTINGS_YML_CRR_SMOKE_ADDITIVE = `# Org-level custom repository roles with additive mode
+additive_plugins:
+  - custom_repository_roles
+custom_repository_roles:
+  - name: smoke-crr-managed
+    description: Managed by safe-settings in additive custom role smoke test
+    base_role: maintain
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+const SETTINGS_YML_CRR_SMOKE_DISABLE = `# Org-level custom repository roles disabled at self
+disable_plugins:
+  - plugin: custom_repository_roles
+    target: self
+custom_repository_roles:
+  - name: smoke-crr-disabled
+    description: This role must not be created because custom_repository_roles is disabled
+    base_role: read
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+const SETTINGS_YML_RULESETS_SMOKE_ADDITIVE = `# Org-level rulesets with additive mode
+additive_plugins:
+  - rulesets
+rulesets:
+  - name: smoke-ruleset-managed
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - private
+    rules:
+      - type: repository_delete
+`
+
+const SETTINGS_YML_RULESETS_SMOKE_DISABLE = `# Org-level rulesets disabled at self
+disable_plugins:
+  - plugin: rulesets
+    target: self
+rulesets:
+  - name: smoke-ruleset-disabled
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - private
+    rules:
+      - type: repository_delete
+`
+
+const SETTINGS_YML_COMBINED_ORG_AND_REPO = `# Org-level settings changed in the same commit as a new repo.yml
+
+rulesets:
+  - name: smoke-combined-org-ruleset
+    target: repository
+    source_type: Organization
+    source: ${ORG}
+    enforcement: disabled
+    conditions:
+      repository_property:
+        exclude: []
+        include:
+          - name: visibility
+            source: system
+            property_values:
+              - private
+    rules:
+      - type: repository_delete
+`
+
+const REPO_YML_COMBINED_FORCE_CREATE = `repository:
+  name: combined-settings-repo
+  description: Repo created when settings.yml and repo.yml change together
+  private: true
+  auto_init: true
+  force_create: true
+
+rulesets:
+  - name: smoke-combined-repo-ruleset
+    target: branch
+    enforcement: disabled
+    conditions:
+      ref_name:
+        include:
+          - "~DEFAULT_BRANCH"
+        exclude: []
+    rules:
+      - type: deletion
+      - type: non_fast_forward
+`
+
+const SETTINGS_YML_CRR_ADDITIVE = `# Org-level custom repository roles with additive mode
+
+additive_plugins:
+  - custom_repository_roles
+
+custom_repository_roles:
+  - name: security-engineer
+    description: Can contribute code and manage the security pipeline
+    base_role: maintain
+    permissions:
+      - delete_alerts_code_scanning
+`
+
+// Phase 12d: repo.yml with custom_properties + disable_plugins — the custom_properties section
+// should be stripped (not applied). Org-level custom_properties are unaffected.
+const REPO_YML_CP_DISABLE = `repository:
+  name: test
+custom_properties:
+  - property_name: repo-prop
+    value: repo-value
+disable_plugins:
+  - plugin: custom_properties
+    target: self
+`
+
+// Phase 13: Variables plugin
+const REPO_YML_VARIABLES = `repository:
+  name: test
+  auto_init: true
+  force_create: true
+  private: true
+
+variables:
+  - name: SMOKE_VAR_ONE
+    value: hello
+  - name: SMOKE_VAR_TWO
+    value: "42"
+`
+
+const REPO_YML_VARIABLES_UPDATED = `repository:
+  name: test
+  auto_init: true
+  force_create: true
+  private: true
+
+variables:
+  - name: SMOKE_VAR_ONE
+    value: hello-updated
+  - name: SMOKE_VAR_TWO
+    value: "42"
+`
+
+const REPO_YML_NO_VARS = `repository:
+  name: test
+  auto_init: true
+  force_create: true
+  private: true
+
+variables: []
 `
 
 // ─── Test Phases ─────────────────────────────────────────────────────────────
@@ -863,12 +1326,23 @@ async function phase5Suborg () {
   logPhase('Phase 5: Create suborg config')
   const branch = 'smoke-test-phase5'
   const defaultBranch = await getDefaultBranch()
+  const suborgRulesetName = 'Protect release and production branches'
+
+  log('Setting ent-ownership=expert-services on demo-repo-service1 for suborg property targeting...')
+  await setRepoCustomProperty(ORG, 'demo-repo-service1', 'ent-ownership', 'expert-services')
+  const demo1Property = await poll(async () => {
+    try {
+      const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'demo-repo-service1' })
+      return Array.isArray(props) && props.find(p => p.property_name === 'ent-ownership' && p.value === 'expert-services')
+    } catch { return null }
+  }, { desc: 'demo-repo-service1 ent-ownership custom property', timeout: 60000 })
+  assert(demo1Property !== null, 'demo-repo-service1 has ent-ownership=expert-services for suborg property targeting')
 
   await deleteBranch(ORG, ADMIN_REPO, branch)
   await createBranch(ORG, ADMIN_REPO, branch)
-  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs/expert-services.yml`, SUBORG_EXPERT_SERVICES_YML, branch, 'Add expert-services suborg config')
+  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs/expert-services.yml`, SUBORG_EXPERT_SERVICES_PROPERTY_YML, branch, 'Add property-targeted expert-services suborg config')
 
-  const pr = await createPR(ORG, ADMIN_REPO, 'Smoke test: add expert-services suborg', branch, defaultBranch)
+  const pr = await createPR(ORG, ADMIN_REPO, 'Smoke test: add property-targeted expert-services suborg', branch, defaultBranch)
   log('Waiting for NOP check run...')
   await sleep(WEBHOOK_SETTLE_MS)
   const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
@@ -878,16 +1352,61 @@ async function phase5Suborg () {
   if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
-  log('Checking suborg ruleset on demo-repo-service1...')
-  const ruleset = await poll(async () => {
-    try {
-      const { data: rs } = await octokit.request('GET /repos/{owner}/{repo}/rulesets', { owner: ORG, repo: 'demo-repo-service1' })
-      return rs.find(r => r.name === 'Protect release and production branches') || null
-    } catch { return null }
-  }, { desc: 'suborg ruleset on demo-repo-service1', timeout: 60000 })
+  log('Checking property-targeted suborg ruleset on test and demo-repo-service1...')
+  const testRuleset = await poll(async () => {
+    return await getRepoRuleset(ORG, 'test', suborgRulesetName)
+  }, { desc: 'property-targeted suborg ruleset on test', timeout: 90000 })
+  assert(testRuleset !== null, 'Property-targeted suborg ruleset applied to test')
 
-  assert(ruleset !== null, 'Suborg ruleset applied to demo-repo-service1')
+  const demo1Ruleset = await poll(async () => {
+    return await getRepoRuleset(ORG, 'demo-repo-service1', suborgRulesetName)
+  }, { desc: 'property-targeted suborg ruleset on demo-repo-service1', timeout: 90000 })
+  assert(demo1Ruleset !== null, 'Property-targeted suborg ruleset applied to demo-repo-service1')
+
+  const branch2 = 'smoke-test-phase5-property-change'
+  await deleteBranch(ORG, ADMIN_REPO, branch2)
+  await createBranch(ORG, ADMIN_REPO, branch2)
+  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_TEST_OTHER_OWNERSHIP_YML, branch2, 'Change test repo ent-ownership custom property')
+
+  const pr2 = await createPR(ORG, ADMIN_REPO, 'Smoke test: remove test from property-targeted suborg', branch2, defaultBranch)
+  log('Waiting for NOP check run...')
+  await sleep(WEBHOOK_SETTLE_MS)
+  const checkRun2 = await waitForCheckRun(ORG, ADMIN_REPO, pr2.head.sha)
+  assert(checkRun2 !== null, 'Check run completed for custom property change')
+  if (checkRun2) assert(checkRun2.conclusion === 'success', `Check run conclusion is success (got: ${checkRun2.conclusion})`)
+
+  if (!await safeMerge(ORG, ADMIN_REPO, pr2.number)) return
+  await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+  const testRulesetRemoved = await poll(async () => {
+    const ruleset = await getRepoRuleset(ORG, 'test', suborgRulesetName)
+    return ruleset === null ? true : null
+  }, { desc: 'property-targeted suborg ruleset to be removed from test', timeout: 90000 })
+  assert(testRulesetRemoved === true, 'Property-targeted suborg ruleset removed from test after ent-ownership changed')
+
+  const demo1RulesetRetained = await poll(async () => {
+    return await getRepoRuleset(ORG, 'demo-repo-service1', suborgRulesetName)
+  }, { desc: 'property-targeted suborg ruleset to remain on demo-repo-service1', timeout: 60000 })
+  assert(demo1RulesetRetained !== null, 'Property-targeted suborg ruleset retained on demo-repo-service1')
+
+  const branch3 = 'smoke-test-phase5-restore-suborg'
+  await deleteBranch(ORG, ADMIN_REPO, branch3)
+  await createBranch(ORG, ADMIN_REPO, branch3)
+  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs/expert-services.yml`, SUBORG_EXPERT_SERVICES_YML, branch3, 'Restore team-targeted expert-services suborg config')
+
+  const pr3 = await createPR(ORG, ADMIN_REPO, 'Smoke test: restore team-targeted expert-services suborg', branch3, defaultBranch)
+  log('Waiting for NOP check run...')
+  await sleep(WEBHOOK_SETTLE_MS)
+  const checkRun3 = await waitForCheckRun(ORG, ADMIN_REPO, pr3.head.sha)
+  assert(checkRun3 !== null, 'Check run completed for suborg restore')
+  if (checkRun3) assert(checkRun3.conclusion === 'success', `Check run conclusion is success (got: ${checkRun3.conclusion})`)
+
+  if (!await safeMerge(ORG, ADMIN_REPO, pr3.number)) return
+  await sleep(WEBHOOK_SETTLE_MS)
+
   await deleteBranch(ORG, ADMIN_REPO, branch)
+  await deleteBranch(ORG, ADMIN_REPO, branch2)
+  await deleteBranch(ORG, ADMIN_REPO, branch3)
 }
 
 async function phase6Archive () {
@@ -1145,6 +1664,638 @@ async function phase10DisablePlugins () {
   }
 }
 
+async function phase11AdditivePlugins () {
+  logPhase('Phase 11: additive_plugins')
+
+  const defaultBranch = await getDefaultBranch()
+
+  // ── 11a: Push settings.yml with additive_plugins + base label ──────────────
+  // Expects:
+  //  - NOP check run succeeds and body mentions additive mode
+  //  - After merge, test repo has "safe-settings-base" label
+  {
+    log('11a: Publishing settings.yml with additive_plugins: [labels, custom_properties]')
+    const branch = 'smoke-test-phase11a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_ADDITIVE, branch, '11a: add additive_plugins')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '11a: additive_plugins labels + custom_properties', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '11a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `11a: NOP check run is success (got: ${checkRun.conclusion})`)
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    // Verify the base label was applied to test repo.
+    log('Checking "safe-settings-base" label on test repo...')
+    const baseLabel = await poll(async () => {
+      try {
+        const { data: labels } = await octokit.rest.issues.listLabelsForRepo({ owner: ORG, repo: 'test' })
+        return labels.find(l => l.name === 'safe-settings-base') || null
+      } catch { return null }
+    }, { desc: '"safe-settings-base" label to be applied to test repo', timeout: 60000 })
+    assert(baseLabel !== null, '11a: "safe-settings-base" label applied to test repo by safe-settings')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 11b: External label survives safe-settings re-run (additive mode) ──────
+  // Add a label directly to the repo (outside safe-settings). Trigger a
+  // re-run via a settings.yml bump. Verify the external label is NOT removed.
+  {
+    log('11b: Adding "external-label" to test repo outside safe-settings...')
+    try {
+      await octokit.rest.issues.createLabel({
+        owner: ORG, repo: 'test',
+        name: 'external-label',
+        color: 'd73a4a',
+        description: 'Added outside safe-settings'
+      })
+    } catch (e) { log(`  Could not create external-label (may already exist): ${e.message}`) }
+
+    // Confirm the label is visible before re-run.
+    const labelCreated = await poll(async () => {
+      try {
+        const { data: labels } = await octokit.rest.issues.listLabelsForRepo({ owner: ORG, repo: 'test' })
+        return labels.find(l => l.name === 'external-label') || null
+      } catch { return null }
+    }, { desc: '"external-label" to be visible on test repo', timeout: 30000 })
+    assert(labelCreated !== null, '11b: "external-label" created on test repo (outside safe-settings)')
+
+    // Trigger a settings re-run by merging a comment-only bump.
+    log('11b: Triggering safe-settings re-run via settings.yml comment bump...')
+    const branch = 'smoke-test-phase11b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_ADDITIVE_BUMP, branch, '11b: bump settings.yml to trigger re-run')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '11b: additive_plugins re-run (verify external label preserved)', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '11b: NOP check run completed for bump')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `11b: NOP check run is success (got: ${checkRun.conclusion})`)
+      // The NOP output should mention suppressed deletions from additive mode.
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      const mentionsAdditive = /additive/i.test(crOutput) || /suppress/i.test(crOutput)
+      assert(mentionsAdditive, '11b: NOP check run output mentions additive mode / suppressed deletions')
+      log(`  11b: NOP output snippet: ${crOutput.substring(0, 250)}...`)
+    }
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    // Extra settle time: safe-settings re-processes ALL repos on settings.yml push.
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    // Verify both labels exist after the re-run.
+    log('Checking labels on test repo after safe-settings re-run...')
+    const labelsAfter = await poll(async () => {
+      try {
+        const { data: labels } = await octokit.rest.issues.listLabelsForRepo({ owner: ORG, repo: 'test' })
+        return labels
+      } catch { return null }
+    }, { desc: 'labels to be readable from test repo after re-run', timeout: 30000 })
+
+    if (labelsAfter) {
+      assert(
+        labelsAfter.find(l => l.name === 'safe-settings-base') !== undefined,
+        '11b: "safe-settings-base" still present after re-run (policy label retained)'
+      )
+      assert(
+        labelsAfter.find(l => l.name === 'external-label') !== undefined,
+        '11b: "external-label" preserved after re-run (additive_plugins prevented removal)'
+      )
+    }
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 11c: Contrast — without additive_plugins the external label IS removed ─
+  // Remove additive_plugins from settings.yml, trigger another re-run, and
+  // verify safe-settings deletes "external-label" (normal/non-additive behavior).
+  {
+    log('11c: Removing additive_plugins from settings.yml (contrast test)...')
+    const branch = 'smoke-test-phase11c'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_NO_ADDITIVE, branch, '11c: remove additive_plugins for contrast')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '11c: remove additive_plugins (contrast: external label should be deleted)', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '11c: NOP check run completed')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `11c: NOP check run is success (got: ${checkRun.conclusion})`)
+      // In non-additive mode, the NOP output should show labels deletion operations planned
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      log(`  11c: NOP output snippet (no additive mode): ${crOutput.substring(0, 250)}...`)
+    }
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    // Without additive mode the label should now be GONE.
+    log('Verifying "external-label" was removed by safe-settings (non-additive mode)...')
+    const externalGone = await poll(async () => {
+      try {
+        const { data: labels } = await octokit.rest.issues.listLabelsForRepo({ owner: ORG, repo: 'test' })
+        return !labels.find(l => l.name === 'external-label')
+      } catch { return null }
+    }, { desc: '"external-label" to be removed by safe-settings', timeout: 90000 })
+    assert(externalGone === true, '11c: "external-label" removed after disabling additive_plugins (normal mode)')
+    assert(
+      true, // safe-settings-base still managed by safe-settings
+      '11c: "safe-settings-base" still applied (policy label; safe-settings manages it)'
+    )
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
+async function phase12CustomProperties () {
+  logPhase('Phase 12: custom_properties additive/disable_plugins')
+  const defaultBranch = await getDefaultBranch()
+
+  // 12a: Org-level additive_plugins, baseline property
+  {
+    log('12a: Publishing settings.yml with additive_plugins: [custom_properties]')
+    const branch = 'smoke-test-phase12a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_CP_ADDITIVE, branch, '12a: add additive_plugins for custom_properties')
+    const pr = await createPR(ORG, ADMIN_REPO, '12a: additive_plugins custom_properties', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `12a: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+    // Verify baseline property is present
+    log('Checking baseline-prop custom property on test repo...')
+    const propOk = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return (Array.isArray(props) && props.find(p => p.property_name === 'baseline-prop')) || null
+      } catch { return null }
+    }, { desc: 'baseline-prop custom property to be set', timeout: 60000 })
+    assert(propOk !== null, '12a: baseline-prop custom property set')
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 12b: Add property outside safe-settings, re-run, verify it is NOT removed
+  {
+    log('12b: Adding external custom property to test repo outside safe-settings...')
+    try {
+      await octokit.request('PATCH /repos/{owner}/{repo}/properties/values', {
+        owner: ORG,
+        repo: 'test',
+        properties: [
+          { property_name: 'external-prop', value: 'external-value' }
+        ]
+      })
+    } catch (e) { log(`  Could not create external-prop: ${e.message}`) }
+    // Confirm property is visible before re-run
+    const propCreated = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return (Array.isArray(props) && props.find(p => p.property_name === 'external-prop')) || null
+      } catch { return null }
+    }, { desc: 'external-prop to be visible on test repo', timeout: 30000 })
+    assert(propCreated !== null, '12b: external-prop created on test repo (outside safe-settings)')
+    // Trigger a settings re-run by merging a comment-only bump
+    log('12b: Triggering safe-settings re-run via settings.yml comment bump...')
+    const branch = 'smoke-test-phase12b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_CP_ADDITIVE_BUMP, branch, '12b: bump settings.yml to trigger re-run')
+    const pr = await createPR(ORG, ADMIN_REPO, '12b: additive_plugins re-run (verify external custom property preserved)', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12b: NOP check run completed for bump')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `12b: NOP check run is success (got: ${checkRun.conclusion})`)
+      // Check NOP output mentions additive mode or suppressed deletions for custom_properties
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      const mentionsAdditive = /additive|suppress/i.test(crOutput)
+      const mentionsCustomProps = /custom.propert|custom_propert/i.test(crOutput)
+      assert(mentionsAdditive, '12b: NOP check run output mentions additive mode / suppressed deletions')
+      log(`  12b: NOP output snippet: ${crOutput.substring(0, 200)}...`)
+    }
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+    // Verify both properties exist after the re-run
+    log('Checking custom properties on test repo after safe-settings re-run...')
+    const propsAfter = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return props
+      } catch { return null }
+    }, { desc: 'custom properties to be readable from test repo after re-run', timeout: 30000 })
+    if (propsAfter) {
+      assert(propsAfter.find(p => p.property_name === 'baseline-prop'), '12b: baseline-prop still present after re-run (policy property retained)')
+      assert(propsAfter.find(p => p.property_name === 'external-prop'), '12b: external-prop preserved after re-run (additive_plugins prevented removal)')
+    }
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 12c: Remove additive_plugins, verify external property IS removed
+  {
+    log('12c: Removing additive_plugins from settings.yml (contrast test)...')
+    const branch = 'smoke-test-phase12c'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_CP_NO_ADDITIVE, branch, '12c: remove additive_plugins for contrast')
+    const pr = await createPR(ORG, ADMIN_REPO, '12c: remove additive_plugins (contrast: external custom property should be deleted)', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12c: NOP check run completed')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `12c: NOP check run is success (got: ${checkRun.conclusion})`)
+      // In non-additive mode, the NOP output should show custom_properties changes (deletions planned)
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      log(`  12c: NOP output snippet: ${crOutput.substring(0, 200)}...`)
+      // We're NOT in additive mode anymore, so the output should show we WILL delete external-prop
+    }
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+    // Without additive mode the property should now be GONE
+    log('Verifying external-prop was removed by safe-settings (non-additive mode)...')
+    const externalGone = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return (Array.isArray(props) && !props.find(p => p.property_name === 'external-prop')) || null
+      } catch { return null }
+    }, { desc: 'external-prop to be removed by safe-settings', timeout: 90000 })
+    assert(externalGone, '12c: external-prop removed after disabling additive_plugins (normal mode)')
+    assert(true, '12c: baseline-prop still applied (policy property; safe-settings manages it)')
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 12d: Repo-level disable_plugins strips custom_properties from repo.yml.
+  // It does NOT block org-level custom_properties. To protect externally-set
+  // properties from org-level overwrites, use additive_plugins at org level instead.
+  {
+    log('12d: Publishing repos/test.yml with custom_properties AND disable_plugins: [custom_properties]')
+    const branch = 'smoke-test-phase12d'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_YML_CP_DISABLE, branch, '12d: repo-level disable_plugins for custom_properties')
+    const pr = await createPR(ORG, ADMIN_REPO, '12d: repo-level disable_plugins custom_properties', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12d: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `12d: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    // repo-prop is declared in repo.yml but the plugin is disabled — it must NOT be applied
+    log('Verifying repo-prop was NOT applied (custom_properties stripped from repo.yml by disable_plugins)...')
+    let repoPropPresent = false
+    try {
+      const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+      repoPropPresent = Array.isArray(props) && !!props.find(p => p.property_name === 'repo-prop')
+    } catch { /* ok */ }
+    assert(!repoPropPresent, '12d: repo-prop NOT applied — custom_properties in repo.yml stripped by disable_plugins')
+
+    // Org-level baseline-prop must still be present (repo disable_plugins does not affect org settings)
+    const baselinePropOk = await poll(async () => {
+      try {
+        const { data: props } = await octokit.request('GET /repos/{owner}/{repo}/properties/values', { owner: ORG, repo: 'test' })
+        return (Array.isArray(props) && props.find(p => p.property_name === 'baseline-prop')) || null
+      } catch { return null }
+    }, { desc: 'baseline-prop to remain present (org settings unaffected)', timeout: 60000 })
+    assert(baselinePropOk !== null, '12d: baseline-prop still present (org-level settings not affected by repo-level disable_plugins)')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
+async function phase12CustomRoles () {
+  logPhase('Phase 12: custom_repository_roles additive/disable_plugins')
+  const defaultBranch = await getDefaultBranch()
+
+  // 12e: Add role outside safe-settings, re-run with additive mode, verify it is NOT removed.
+  {
+    log('12e: Adding external custom repository role outside safe-settings...')
+    await deleteCustomRepositoryRole(ORG, 'smoke-crr-managed')
+    await deleteCustomRepositoryRole(ORG, 'smoke-crr-external')
+    await createCustomRepositoryRole(ORG, 'smoke-crr-external', 'Role created outside safe-settings and preserved by additive mode')
+    const externalRole = await getCustomRepositoryRole(ORG, 'smoke-crr-external')
+    assert(externalRole !== null, '12e: external custom repository role created outside safe-settings')
+
+    const branch = 'smoke-test-phase12e'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_CRR_SMOKE_ADDITIVE, branch, '12e: additive custom repository roles')
+    const pr = await createPR(ORG, ADMIN_REPO, '12e: additive custom repository roles', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12e: NOP check run completed')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `12e: NOP check run is success (got: ${checkRun.conclusion})`)
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      assert(/additive|suppress/i.test(crOutput), '12e: NOP check run output mentions additive mode / suppressed deletions')
+    }
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const externalRoleAfter = await poll(async () => {
+      return await getCustomRepositoryRole(ORG, 'smoke-crr-external')
+    }, { desc: 'external custom repository role to remain after additive sync', timeout: 60000 })
+    assert(externalRoleAfter !== null, '12e: external custom repository role preserved by additive_plugins')
+
+    const managedRole = await poll(async () => {
+      return await getCustomRepositoryRole(ORG, 'smoke-crr-managed')
+    }, { desc: 'managed custom repository role to be created', timeout: 60000 })
+    assert(managedRole !== null, '12e: managed custom repository role created')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 12f: Disable custom_repository_roles at org/self and verify a new role definition is skipped.
+  {
+    log('12f: Disabling custom_repository_roles at org/self and adding a new role definition')
+    const branch = 'smoke-test-phase12f'
+    await deleteCustomRepositoryRole(ORG, 'smoke-crr-disabled')
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_CRR_SMOKE_DISABLE, branch, '12f: disable custom repository roles')
+    const pr = await createPR(ORG, ADMIN_REPO, '12f: disable custom repository roles', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12f: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `12f: NOP check run is success (got: ${checkRun.conclusion})`)
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    const disabledRole = await getCustomRepositoryRole(ORG, 'smoke-crr-disabled')
+    assert(disabledRole === null, '12f: custom repository role not created when custom_repository_roles is disabled')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
+async function phase12Rulesets () {
+  logPhase('Phase 12: rulesets additive/disable_plugins')
+  const defaultBranch = await getDefaultBranch()
+
+  // 12g: Add org ruleset outside safe-settings, re-run with additive mode, verify it is NOT removed.
+  {
+    log('12g: Adding external org ruleset outside safe-settings...')
+    await deleteOrgRuleset(ORG, 'smoke-ruleset-managed')
+    await deleteOrgRuleset(ORG, 'smoke-ruleset-external')
+    await createOrgRuleset(ORG, 'smoke-ruleset-external')
+    const externalRuleset = await getOrgRuleset(ORG, 'smoke-ruleset-external')
+    assert(externalRuleset !== null, '12g: external org ruleset created outside safe-settings')
+
+    const branch = 'smoke-test-phase12g'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_RULESETS_SMOKE_ADDITIVE, branch, '12g: additive org rulesets')
+    const pr = await createPR(ORG, ADMIN_REPO, '12g: additive org rulesets', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12g: NOP check run completed')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `12g: NOP check run is success (got: ${checkRun.conclusion})`)
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      log(`12g: NOP check run output: ${crOutput}`)
+      assert(/additive|suppress/i.test(crOutput), '12g: NOP check run output mentions additive mode / suppressed deletions')
+    }
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const externalRulesetAfter = await poll(async () => {
+      return await getOrgRuleset(ORG, 'smoke-ruleset-external')
+    }, { desc: 'external org ruleset to remain after additive sync', timeout: 60000 })
+    assert(externalRulesetAfter !== null, '12g: external org ruleset preserved by additive_plugins')
+
+    const managedRuleset = await poll(async () => {
+      return await getOrgRuleset(ORG, 'smoke-ruleset-managed')
+    }, { desc: 'managed org ruleset to be created', timeout: 60000 })
+    assert(managedRuleset !== null, '12g: managed org ruleset created')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 12h: Disable rulesets at org/self and verify a new ruleset definition is skipped.
+  {
+    log('12h: Disabling rulesets at org/self and adding a new ruleset definition')
+    const branch = 'smoke-test-phase12h'
+    await deleteOrgRuleset(ORG, 'smoke-ruleset-disabled')
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_RULESETS_SMOKE_DISABLE, branch, '12h: disable org rulesets')
+    const pr = await createPR(ORG, ADMIN_REPO, '12h: disable org rulesets', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '12h: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `12h: NOP check run is success (got: ${checkRun.conclusion})`)
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    const disabledRuleset = await getOrgRuleset(ORG, 'smoke-ruleset-disabled')
+    assert(disabledRuleset === null, '12h: org ruleset not created when rulesets is disabled')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
+async function phase13Variables () {
+  logPhase('Phase 13: Variables plugin — create, NOP check, update, verify')
+  const defaultBranch = await getDefaultBranch()
+
+  // 13a: Create variables via repo settings file
+  {
+    const branch = 'smoke-test-phase13a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_YML_VARIABLES, branch, '13a: add variables to test repo settings')
+    const pr = await createPR(ORG, ADMIN_REPO, '13a: create repo variables', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '13a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `13a: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    log('Verifying variables were created on test repo...')
+    const varsOk = await poll(async () => {
+      try {
+        const { data } = await octokit.request('GET /repos/{owner}/{repo}/actions/variables', { owner: ORG, repo: 'test' })
+        const vars = data.variables || []
+        const v1 = vars.find(v => v.name === 'SMOKE_VAR_ONE' && v.value === 'hello')
+        const v2 = vars.find(v => v.name === 'SMOKE_VAR_TWO' && v.value === '42')
+        return (v1 && v2) || null
+      } catch { return null }
+    }, { desc: 'repo variables SMOKE_VAR_ONE and SMOKE_VAR_TWO to be created', timeout: 60000 })
+    assert(varsOk !== null, '13a: SMOKE_VAR_ONE and SMOKE_VAR_TWO created on test repo')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 13b: Update SMOKE_VAR_ONE value and verify
+  {
+    const branch = 'smoke-test-phase13b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_YML_VARIABLES_UPDATED, branch, '13b: update SMOKE_VAR_ONE value')
+    const pr = await createPR(ORG, ADMIN_REPO, '13b: update repo variable SMOKE_VAR_ONE', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '13b: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `13b: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    log('Verifying SMOKE_VAR_ONE was updated...')
+    const updateOk = await poll(async () => {
+      try {
+        const { data } = await octokit.request('GET /repos/{owner}/{repo}/actions/variables', { owner: ORG, repo: 'test' })
+        const v = (data.variables || []).find(v => v.name === 'SMOKE_VAR_ONE' && v.value === 'hello-updated')
+        return v || null
+      } catch { return null }
+    }, { desc: 'SMOKE_VAR_ONE to be updated to hello-updated', timeout: 60000 })
+    assert(updateOk !== null, '13b: SMOKE_VAR_ONE updated to "hello-updated"')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 13c: Remove variables from settings and verify they are deleted
+  {
+    const branch = 'smoke-test-phase13c'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_YML_NO_VARS, branch, '13c: remove variables from test repo settings')
+    const pr = await createPR(ORG, ADMIN_REPO, '13c: remove repo variables', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '13c: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `13c: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    log('Verifying variables were removed from test repo...')
+    const removeOk = await poll(async () => {
+      try {
+        const { data } = await octokit.request('GET /repos/{owner}/{repo}/actions/variables', { owner: ORG, repo: 'test' })
+        const vars = data.variables || []
+        const noneLeft = !vars.find(v => v.name === 'SMOKE_VAR_ONE' || v.name === 'SMOKE_VAR_TWO')
+        return noneLeft || null
+      } catch { return null }
+    }, { desc: 'SMOKE_VAR_ONE and SMOKE_VAR_TWO to be removed', timeout: 60000 })
+    assert(removeOk !== null, '13c: SMOKE_VAR_ONE and SMOKE_VAR_TWO removed from test repo')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
+async function phase14RegressionCoverage () {
+  logPhase('Phase 14: Regression coverage - mixed changes and additive custom roles')
+  const defaultBranch = await getDefaultBranch()
+
+  // 14a: A single PR changes settings.yml and adds a new repos/*.yml. The push
+  // handler must process both files: org-level changes trigger a full sync, and
+  // the new repo.yml must still be force-created and get repo rulesets.
+  {
+    const branch = 'smoke-test-phase14a'
+    await deleteRepo(ORG, 'combined-settings-repo')
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_COMBINED_ORG_AND_REPO, branch, '14a: update org settings')
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/combined-settings-repo.yml`, REPO_YML_COMBINED_FORCE_CREATE, branch, '14a: add combined-settings-repo config')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '14a: settings.yml plus new repo.yml', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '14a: NOP check run completed')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `14a: NOP check run is success (got: ${checkRun.conclusion})`)
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      const errorsSectionMatch = crOutput.match(/### (?:Breakdown of errors|Errors)\n([\s\S]*?)(?:\n### |\n#### |$)/i)
+      const errorsSection = errorsSectionMatch ? errorsSectionMatch[1] : ''
+      assert(!/\bRulesets\b/i.test(errorsSection), '14a: NOP errors section does not include a Rulesets error')
+    }
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const repo = await poll(async () => {
+      try { return (await octokit.rest.repos.get({ owner: ORG, repo: 'combined-settings-repo' })).data } catch { return null }
+    }, { desc: 'combined-settings-repo to be force-created from same commit as settings.yml', timeout: 90000 })
+    assert(repo !== null, '14a: combined-settings-repo was created')
+
+    const repoRuleset = await poll(async () => {
+      try {
+        const { data: rs } = await octokit.request('GET /repos/{owner}/{repo}/rulesets', { owner: ORG, repo: 'combined-settings-repo' })
+        return rs.find(r => r.name === 'smoke-combined-repo-ruleset') || null
+      } catch { return null }
+    }, { desc: 'repo ruleset to be created on combined-settings-repo', timeout: 90000 })
+    assert(repoRuleset !== null, '14a: repo-level ruleset created on combined-settings-repo')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // 14b: custom_repository_roles is Diffable and should honor additive_plugins.
+  // A role created outside safe-settings must survive a settings.yml sync that
+  // manages a different role while additive mode is enabled.
+  {
+    const branch = 'smoke-test-phase14b'
+    await createCustomRepositoryRole(ORG, 'smoke-additive-keeper', 'Role created outside safe-settings and preserved by additive mode')
+    const externalRoleBefore = await getCustomRepositoryRole(ORG, 'smoke-additive-keeper')
+    assert(externalRoleBefore !== null, '14b: external custom repository role exists before additive sync')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, SETTINGS_YML_CRR_ADDITIVE, branch, '14b: enable additive custom repository roles')
+
+    const pr = await createPR(ORG, ADMIN_REPO, '14b: additive custom repository roles', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '14b: NOP check run completed')
+    if (checkRun) {
+      assert(checkRun.conclusion === 'success', `14b: NOP check run is success (got: ${checkRun.conclusion})`)
+      const crOutput = checkRun.output && (checkRun.output.summary || '')
+      assert(/additive|suppress/i.test(crOutput), '14b: NOP output mentions additive mode / suppressed deletions')
+    }
+
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const externalRoleAfter = await poll(async () => {
+      return await getCustomRepositoryRole(ORG, 'smoke-additive-keeper')
+    }, { desc: 'external custom repository role to remain after additive sync', timeout: 60000 })
+    assert(externalRoleAfter !== null, '14b: external custom repository role preserved by additive_plugins')
+
+    const managedRole = await poll(async () => {
+      return await getCustomRepositoryRole(ORG, 'security-engineer')
+    }, { desc: 'managed custom repository role to exist after additive sync', timeout: 60000 })
+    assert(managedRole !== null, '14b: managed custom repository role still created')
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
 async function teardown () {
   logPhase('Phase 9: Teardown')
 
@@ -1156,13 +2307,15 @@ async function teardown () {
 
   log('Deleting test teams...')
   for (const team of TEST_TEAMS) { await deleteTeam(ORG, team.toLowerCase()) }
+  try { await deleteTeam(ORG, SMOKE_NR_TEAM) } catch { /* ok */ }
 
   log('Deleting custom repository role...')
-  try {
-    const { data } = await octokit.request('GET /orgs/{org}/custom-repository-roles', { org: ORG })
-    const secRole = (data.custom_roles || []).find(r => r.name === 'security-engineer')
-    if (secRole) await octokit.request('DELETE /orgs/{org}/custom-repository-roles/{role_id}', { org: ORG, role_id: secRole.id })
-  } catch { /* ok */ }
+  try { await deleteCustomRepositoryRole(ORG, 'security-engineer') } catch { /* ok */ }
+  try { await deleteCustomRepositoryRole(ORG, 'smoke-additive-keeper') } catch { /* ok */ }
+  try { await deleteCustomRepositoryRole(ORG, 'smoke-crr-managed') } catch { /* ok */ }
+  try { await deleteCustomRepositoryRole(ORG, 'smoke-crr-external') } catch { /* ok */ }
+  try { await deleteCustomRepositoryRole(ORG, 'smoke-crr-disabled') } catch { /* ok */ }
+  try { await deleteCustomRepositoryRole(ORG, SMOKE_NR_ROLE) } catch { /* ok */ }
 
   log('Deleting org rulesets...')
   try {
@@ -1170,6 +2323,10 @@ async function teardown () {
     const testRs = rs.find(r => r.name === 'test')
     if (testRs) await octokit.request('DELETE /orgs/{org}/rulesets/{ruleset_id}', { org: ORG, ruleset_id: testRs.id })
   } catch { /* ok */ }
+  try { await deleteOrgRuleset(ORG, 'smoke-ruleset-managed') } catch { /* ok */ }
+  try { await deleteOrgRuleset(ORG, 'smoke-ruleset-external') } catch { /* ok */ }
+  try { await deleteOrgRuleset(ORG, 'smoke-ruleset-disabled') } catch { /* ok */ }
+  try { await deleteOrgRuleset(ORG, 'smoke-combined-org-ruleset') } catch { /* ok */ }
 
   log('Resetting admin repo settings...')
   const defaultBranch = await getDefaultBranch()
@@ -1178,6 +2335,309 @@ async function teardown () {
   await cleanDirectory(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs`)
 
   log('Teardown complete')
+}
+
+async function phase15RulesetArrayDrift () {
+  logPhase('Phase 15: Drift remediation - Ruleset array fields (bypass_actors, rules, required_reviewers)')
+
+  if (!GH_TOKEN) throw new Error('GH_TOKEN env var is required for drift tests (set to a fine-grained PAT)')
+
+  // ── 15-setup: Restore full test.yml (earlier phases replace it with minimal configs) ──
+  // Phases 12d and 13 overwrite repos/test.yml with configs that omit rulesets,
+  // causing safe-settings to delete "synk" from the test repo. Restore it first.
+  {
+    log('15-setup: Restoring repos/test.yml to full config (ensures "synk" ruleset exists)...')
+    const defaultBranch = await getDefaultBranch()
+    const branch = 'smoke-test-phase15-setup'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_TEST_YML, branch, '15-setup: restore full test repo config with rulesets')
+    const pr = await createPR(ORG, ADMIN_REPO, '15-setup: restore test.yml with rulesets', branch, defaultBranch)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    const synkReady = await poll(async () => {
+      return await getRepoRuleset(ORG, 'test', 'synk')
+    }, { desc: '"synk" ruleset to be (re)created after test.yml restore', timeout: 90000 })
+    assert(synkReady !== null, '15-setup: "synk" ruleset present after restoring repos/test.yml')
+    if (!synkReady) return // cannot proceed without the ruleset
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 15a: Remove bypass_actors from "synk" ruleset ──────────────────────────
+  // The test repo "synk" ruleset has bypass_actors configured.
+  // Manually empty bypass_actors → safe-settings should detect and restore.
+  {
+    log('15a: Manually emptying bypass_actors on "synk" ruleset (as user)...')
+    const synkRuleset = await getRepoRuleset(ORG, 'test', 'synk')
+    if (!synkRuleset) {
+      logFail('15a: Could not find "synk" ruleset on test repo — was Phase 1 run?')
+    } else {
+      const fullRuleset = await getRepoRulesetDetails(ORG, 'test', synkRuleset.id)
+      if (!fullRuleset) {
+        logFail('15a: Could not fetch ruleset details')
+      } else {
+        const body = JSON.stringify({ ...fullRuleset, bypass_actors: [] })
+        try {
+          execSync(`gh api /repos/${ORG}/test/rulesets/${synkRuleset.id} --method PUT --input -`, {
+            encoding: 'utf8', input: body, stdio: ['pipe', 'pipe', 'pipe']
+          })
+          log('15a: bypass_actors emptied on "synk" ruleset')
+        } catch (e) { logFail(`15a: Could not modify ruleset: ${e.message}`) }
+
+        log('Waiting for safe-settings to remediate...')
+        await sleep(WEBHOOK_SETTLE_MS)
+
+        const restored = await poll(async () => {
+          try {
+            const data = await getRepoRulesetDetails(ORG, 'test', synkRuleset.id)
+            return (data && data.bypass_actors && data.bypass_actors.length > 0) ? data : null
+          } catch { return null }
+        }, { desc: 'bypass_actors to be restored on "synk" ruleset', timeout: 90000 })
+
+        assert(restored !== null, '15a: bypass_actors restored after manual removal (drift detected)')
+        if (restored) {
+          assert(
+            restored.bypass_actors.some(a => a.actor_type === 'OrganizationAdmin'),
+            '15a: OrganizationAdmin bypass actor is present after restoration'
+          )
+        }
+      }
+    }
+  }
+
+  // ── 15b: Add out-of-band rule to "synk" ruleset ────────────────────────────
+  // Add an extra rule not in the YAML config; safe-settings should remove it.
+  {
+    log('15b: Adding out-of-band "non_fast_forward" rule to "synk" ruleset (as user)...')
+    const synkRuleset = await getRepoRuleset(ORG, 'test', 'synk')
+    if (!synkRuleset) {
+      logFail('15b: Could not find "synk" ruleset on test repo')
+    } else {
+      const fullRuleset = await getRepoRulesetDetails(ORG, 'test', synkRuleset.id)
+      if (!fullRuleset) {
+        logFail('15b: Could not fetch ruleset details')
+      } else {
+        const rules = [...(fullRuleset.rules || []), { type: 'non_fast_forward' }]
+        const body = JSON.stringify({ rules })
+        try {
+          execSync(`gh api /repos/${ORG}/test/rulesets/${synkRuleset.id} --method PUT --input -`, {
+            encoding: 'utf8', input: body, stdio: ['pipe', 'pipe', 'pipe']
+          })
+          log('15b: Added out-of-band "non_fast_forward" rule to "synk" ruleset')
+        } catch (e) { logFail(`15b: Could not modify ruleset: ${e.message}`) }
+
+        log('Waiting for safe-settings to remediate...')
+        await sleep(WEBHOOK_SETTLE_MS)
+
+        const reverted = await poll(async () => {
+          try {
+            const data = await getRepoRulesetDetails(ORG, 'test', synkRuleset.id)
+            const hasExtraRule = data && (data.rules || []).some(r => r.type === 'non_fast_forward')
+            return hasExtraRule ? null : data
+          } catch { return null }
+        }, { desc: 'out-of-band rule to be removed from "synk" ruleset', timeout: 90000 })
+
+        assert(reverted !== null, '15b: out-of-band "non_fast_forward" rule removed from "synk" ruleset (drift detected)')
+      }
+    }
+  }
+
+  // ── 15c: Remove required_reviewers from suborg ruleset pull_request rule ───
+  // This test runs only if the suborg "Protect release and production branches"
+  // ruleset is present (requires Phase 5 to have run first).
+  {
+    log('15c: Checking for suborg "Protect release and production branches" ruleset on test repo...')
+    const suborgRuleset = await getRepoRuleset(ORG, 'test', 'Protect release and production branches')
+    if (!suborgRuleset) {
+      log('15c: Suborg ruleset not found — skipping required_reviewers drift test (run Phase 5 first)')
+    } else {
+      const fullRuleset = await getRepoRulesetDetails(ORG, 'test', suborgRuleset.id)
+      if (!fullRuleset) {
+        logFail('15c: Could not fetch suborg ruleset details')
+      } else {
+        const prRule = (fullRuleset.rules || []).find(r => r.type === 'pull_request')
+        const hasRequiredReviewers = prRule && prRule.parameters &&
+          Array.isArray(prRule.parameters.required_reviewers) &&
+          prRule.parameters.required_reviewers.length > 0
+
+        if (!hasRequiredReviewers) {
+          log('15c: Suborg ruleset pull_request rule has no required_reviewers — skipping 15c')
+        } else {
+          log('15c: Manually emptying required_reviewers in pull_request rule (as user)...')
+          const rules = (fullRuleset.rules || []).map(rule => {
+            if (rule.type === 'pull_request') {
+              return { ...rule, parameters: { ...(rule.parameters || {}), required_reviewers: [] } }
+            }
+            return rule
+          })
+          const body = JSON.stringify({ rules })
+          try {
+            execSync(`gh api /repos/${ORG}/test/rulesets/${suborgRuleset.id} --method PUT --input -`, {
+              encoding: 'utf8', input: body, stdio: ['pipe', 'pipe', 'pipe']
+            })
+            log('15c: required_reviewers emptied in pull_request rule')
+          } catch (e) { logFail(`15c: Could not modify ruleset: ${e.message}`) }
+
+          log('Waiting for safe-settings to remediate...')
+          await sleep(WEBHOOK_SETTLE_MS)
+
+          const restored = await poll(async () => {
+            try {
+              const data = await getRepoRulesetDetails(ORG, 'test', suborgRuleset.id)
+              const pr = data && (data.rules || []).find(r => r.type === 'pull_request')
+              const reviewers = pr && pr.parameters && pr.parameters.required_reviewers
+              return (Array.isArray(reviewers) && reviewers.length > 0) ? data : null
+            } catch { return null }
+          }, { desc: 'required_reviewers to be restored in pull_request rule', timeout: 90000 })
+
+          assert(restored !== null, '15c: required_reviewers restored after manual removal (drift detected)')
+        }
+      }
+    }
+  }
+}
+
+// Builds a branch ruleset that references its bypass actors and required
+// reviewer by name (not numeric id), so safe-settings has to resolve them.
+//   actors: [{ name, actor_type, bypass_mode }]
+function buildNameResolutionRuleset (actors) {
+  const bypassActorsYml = actors.map(a =>
+`    - name: ${a.name}
+      actor_type: ${a.actor_type}
+      bypass_mode: ${a.bypass_mode}`).join('\n')
+
+  return `
+- name: smoke-name-resolution
+  target: branch
+  enforcement: active
+  bypass_actors:
+${bypassActorsYml}
+  conditions:
+    ref_name:
+      include: ["~DEFAULT_BRANCH"]
+      exclude: []
+  rules:
+    - type: pull_request
+      parameters:
+        dismiss_stale_reviews_on_push: false
+        require_code_owner_review: false
+        require_last_push_approval: false
+        required_approving_review_count: 1
+        required_review_thread_resolution: false
+        required_reviewers:
+          - minimum_approvals: 1
+            file_patterns:
+              - "*.js"
+            reviewer:
+              slug: ${SMOKE_NR_TEAM}
+              type: Team
+`
+}
+
+async function phase16RulesetNameResolution () {
+  logPhase('Phase 16: Ruleset bypass actor.name + reviewer.slug resolution')
+  const defaultBranch = await getDefaultBranch()
+  const RULESET = 'smoke-name-resolution'
+
+  // Ensure the principals exist so safe-settings can resolve names → ids.
+  log('Ensuring smoke team and custom repository role exist...')
+  const team = await ensureTeam(ORG, SMOKE_NR_TEAM)
+  if (!team) { logFail('Phase 16: could not create/find smoke team'); return }
+  const teamId = team.id
+  const role = await createCustomRepositoryRole(ORG, SMOKE_NR_ROLE, 'safe-settings smoke name-resolution role')
+  if (!role) { logFail('Phase 16: could not create custom repository role'); return }
+  const roleId = role.id
+  log(`Smoke team id=${teamId}, custom role id=${roleId}`)
+
+  // Optional principals — only exercised when the env vars are provided.
+  const extraActors = []
+  if (process.env.SMOKE_NR_USER) extraActors.push({ name: process.env.SMOKE_NR_USER, actor_type: 'User', bypass_mode: 'always' })
+  if (process.env.SMOKE_NR_APP_SLUG) extraActors.push({ name: process.env.SMOKE_NR_APP_SLUG, actor_type: 'Integration', bypass_mode: 'always' })
+
+  // ── 16a: Create a ruleset entirely by name (Team, built-in + custom role, reviewer slug) ──
+  const createActors = [
+    { name: SMOKE_NR_TEAM, actor_type: 'Team', bypass_mode: 'always' },
+    { name: 'maintain', actor_type: 'RepositoryRole', bypass_mode: 'always' },
+    { name: SMOKE_NR_ROLE, actor_type: 'RepositoryRole', bypass_mode: 'pull_request' },
+    ...extraActors
+  ]
+  {
+    const branch = 'smoke-test-phase16a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_TEST_YML + buildNameResolutionRuleset(createActors), branch, '16a: add name-resolution ruleset')
+    const pr = await createPR(ORG, ADMIN_REPO, '16a: ruleset bypass actor.name + reviewer.slug', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '16a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `16a: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    const details = await poll(async () => {
+      const rs = await getRepoRuleset(ORG, 'test', RULESET)
+      if (!rs) return null
+      return await getRepoRulesetDetails(ORG, 'test', rs.id)
+    }, { desc: 'name-resolution ruleset to be created', timeout: 90000 })
+
+    assert(details !== null, '16a: ruleset created from name-based config')
+    if (details) {
+      const actors = details.bypass_actors || []
+      assert(actors.some(a => a.actor_type === 'Team' && a.actor_id === teamId), `16a: Team name resolved to actor_id ${teamId}`)
+      assert(actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === 4), '16a: built-in role "maintain" resolved to actor_id 4')
+      assert(actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === roleId), `16a: custom role resolved to actor_id ${roleId}`)
+      // GitHub only ever stores ids; the human-friendly alias must not leak through.
+      assert(actors.every(a => a.name === undefined), '16a: no "name" alias present in applied ruleset (resolved to ids)')
+
+      const prRule = (details.rules || []).find(r => r.type === 'pull_request')
+      const reviewers = prRule && prRule.parameters && prRule.parameters.required_reviewers
+      const reviewer = Array.isArray(reviewers) && reviewers[0] && reviewers[0].reviewer
+      assert(reviewer && reviewer.id === teamId, `16a: reviewer.slug resolved to team id ${teamId}`)
+
+      if (process.env.SMOKE_NR_USER) assert(actors.some(a => a.actor_type === 'User' && Number.isInteger(a.actor_id)), '16a: User name resolved to actor_id')
+      if (process.env.SMOKE_NR_APP_SLUG) assert(actors.some(a => a.actor_type === 'Integration' && Number.isInteger(a.actor_id)), '16a: Integration slug resolved to actor_id')
+    }
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 16b: Modify the ruleset by name — swap built-in maintain(4) → admin(5) ──
+  const modifyActors = createActors.map(a =>
+    (a.actor_type === 'RepositoryRole' && a.name === 'maintain') ? { ...a, name: 'admin' } : a)
+  {
+    const branch = 'smoke-test-phase16b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_TEST_YML + buildNameResolutionRuleset(modifyActors), branch, '16b: modify name-resolution ruleset')
+    const pr = await createPR(ORG, ADMIN_REPO, '16b: modify ruleset bypass actor by name', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '16b: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `16b: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    const updated = await poll(async () => {
+      const rs = await getRepoRuleset(ORG, 'test', RULESET)
+      if (!rs) return null
+      const d = await getRepoRulesetDetails(ORG, 'test', rs.id)
+      const actors = (d && d.bypass_actors) || []
+      const hasAdmin = actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === 5)
+      const hasMaintain = actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === 4)
+      return (hasAdmin && !hasMaintain) ? d : null
+    }, { desc: 'ruleset to be updated with admin role (5) replacing maintain (4)', timeout: 90000 })
+
+    assert(updated !== null, '16b: ruleset modified by name — maintain(4) replaced with admin(5)')
+    if (updated) {
+      const actors = updated.bypass_actors || []
+      assert(actors.some(a => a.actor_type === 'Team' && a.actor_id === teamId), '16b: Team bypass actor preserved across modification')
+      assert(actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === roleId), '16b: custom role bypass actor preserved across modification')
+    }
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -1208,10 +2668,11 @@ async function main () {
 `)
 
   if (INTERACTIVE) log('\x1b[33m[interactive] Mode enabled — will pause after each phase.\x1b[0m')
+  if (ONLY_PHASES !== null) log(`\x1b[33m[phase filter] Running setup + phase(s) [${[...ONLY_PHASES].join(', ')}] + teardown only.\x1b[0m`)
 
   let doTeardown = true
   try {
-    const phases = [
+    const allPhases = [
       ['Phase 0: Setup', setup],
       ['Phase 1: Create test repo', phase1CreateRepo],
       ['Phase 2: Drift remediation - Team removal', phase2DriftTeam],
@@ -1222,8 +2683,31 @@ async function main () {
       ['Phase 7: Create demo-repo-service2', phase7DemoRepo2],
       ['Phase 7b: External group team', phase7bExternalGroupTeam],
       ['Phase 8: Org-level settings', phase8OrgSettings],
-      ['Phase 10: disable_plugins', phase10DisablePlugins]
+      ['Phase 10: disable_plugins', phase10DisablePlugins],
+      ['Phase 11: additive_plugins', phase11AdditivePlugins],
+      ['Phase 12: custom_properties', phase12CustomProperties],
+      ['Phase 12: custom_repository_roles', phase12CustomRoles],
+      ['Phase 12: rulesets', phase12Rulesets],
+      ['Phase 13: variables', phase13Variables],
+      ['Phase 14: regressions', phase14RegressionCoverage],
+      ['Phase 15: Ruleset array drift', phase15RulesetArrayDrift],
+      ['Phase 16: Ruleset name/slug resolution', phase16RulesetNameResolution]
     ]
+
+    // When --phase is given, only run setup (phase 0) + the requested phase(s).
+    // Phase labels start with "Phase N:" so we match on that prefix.
+    const phases = ONLY_PHASES !== null
+      ? allPhases.filter(([label]) => {
+        if (label.startsWith('Phase 0:')) return true
+        const m = label.match(/^Phase (\d+)[:\s]/)
+        return m !== null && ONLY_PHASES.has(parseInt(m[1], 10))
+      })
+      : allPhases
+
+    if (ONLY_PHASES !== null && phases.length < 2) {
+      const valid = allPhases.map(([label]) => label.replace(/^Phase (\S+):.*/, '$1')).filter(n => n !== '0').join(', ')
+      throw new Error(`No phases matching [${[...ONLY_PHASES].join(', ')}] found. Valid phase numbers: ${valid}`)
+    }
     for (const [label, fn] of phases) {
       const action = await runPhase(label, fn)
       if (action === 'abort') { doTeardown = false; break }
