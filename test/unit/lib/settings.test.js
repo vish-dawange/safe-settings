@@ -1406,4 +1406,164 @@ repository:
       })
     })
   })
+
+  describe('getReposRemovedFromSubOrgTargeting', () => {
+    let settings
+
+    beforeEach(() => {
+      stubConfig = { restrictedRepos: {} }
+      settings = createSettings(stubConfig)
+    })
+
+    it('returns empty array when no changedSubOrgs provided', async () => {
+      const result = await settings.getReposRemovedFromSubOrgTargeting([], 'prev-sha')
+      expect(result).toEqual([])
+    })
+
+    it('returns empty array when no baseRef provided', async () => {
+      const result = await settings.getReposRemovedFromSubOrgTargeting([{ path: '.github/suborgs/frontend.yml' }], null)
+      expect(result).toEqual([])
+    })
+
+    it('identifies repos removed from suborgrepos targeting', async () => {
+      // Previous config had repo-a and repo-b in suborgrepos
+      const previousContent = Buffer.from(yaml.dump({
+        suborgrepos: ['repo-a', 'repo-b'],
+        teams: [{ name: 'core', permission: 'push' }]
+      })).toString('base64')
+
+      stubContext.octokit.repos.getContent = jest.fn().mockImplementation((params) => {
+        if (params.ref === 'prev-sha') {
+          return Promise.resolve({ data: { content: previousContent } })
+        }
+        // Current config: default mock (has new-repo in suborgrepos)
+        const currentContent = Buffer.from(yaml.dump({
+          suborgrepos: ['repo-b'],
+          teams: [{ name: 'core', permission: 'push' }]
+        })).toString('base64')
+        return Promise.resolve({ data: { content: currentContent } })
+      })
+
+      // Current subOrgConfigs only has repo-b (repo-a was removed from targeting)
+      settings.subOrgConfigs = {
+        'repo-b': { source: '.github/suborgs/frontend.yml' }
+      }
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [{ path: '.github/suborgs/frontend.yml', name: 'frontend' }],
+        'prev-sha'
+      )
+
+      expect(result).toContain('repo-a')
+      expect(result).not.toContain('repo-b')
+    })
+
+    it('identifies repos removed from suborgteams targeting', async () => {
+      // Previous config used suborgteams: [team-a]
+      const previousContent = Buffer.from(yaml.dump({
+        suborgteams: ['team-a'],
+        teams: [{ name: 'core', permission: 'push' }]
+      })).toString('base64')
+
+      stubContext.octokit.repos.getContent = jest.fn().mockImplementation((params) => {
+        if (params.ref === 'prev-sha') {
+          return Promise.resolve({ data: { content: previousContent } })
+        }
+        return Promise.resolve({ data: { content: previousContent } })
+      })
+
+      // Mock getReposForTeam to return repos for team-a
+      settings.getReposForTeam = jest.fn().mockResolvedValue([
+        { name: 'team-repo-1' },
+        { name: 'team-repo-2' }
+      ])
+
+      // Current subOrgConfigs: only team-repo-1 still matches (team-repo-2 was removed)
+      settings.subOrgConfigs = {
+        'team-repo-1': { source: '.github/suborgs/frontend.yml' }
+      }
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [{ path: '.github/suborgs/frontend.yml', name: 'frontend' }],
+        'prev-sha'
+      )
+
+      expect(result).toContain('team-repo-2')
+      expect(result).not.toContain('team-repo-1')
+    })
+
+    it('identifies repos removed from suborgproperties targeting', async () => {
+      // Previous config used suborgproperties
+      const previousContent = Buffer.from(yaml.dump({
+        suborgproperties: [{ EDP: true }],
+        teams: [{ name: 'core', permission: 'push' }]
+      })).toString('base64')
+
+      stubContext.octokit.repos.getContent = jest.fn().mockImplementation((params) => {
+        if (params.ref === 'prev-sha') {
+          return Promise.resolve({ data: { content: previousContent } })
+        }
+        return Promise.resolve({ data: { content: previousContent } })
+      })
+
+      // Mock getSubOrgRepositories to return repos with the property
+      settings.getSubOrgRepositories = jest.fn().mockResolvedValue([
+        { repository_name: 'prop-repo-1' },
+        { repository_name: 'prop-repo-2' }
+      ])
+
+      // Current subOrgConfigs: only prop-repo-1 still matches
+      settings.subOrgConfigs = {
+        'prop-repo-1': { source: '.github/suborgs/frontend.yml' }
+      }
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [{ path: '.github/suborgs/frontend.yml', name: 'frontend' }],
+        'prev-sha'
+      )
+
+      expect(result).toContain('prop-repo-2')
+      expect(result).not.toContain('prop-repo-1')
+    })
+
+    it('deduplicates removed repos across multiple suborg files', async () => {
+      const previousContent = Buffer.from(yaml.dump({
+        suborgrepos: ['repo-a', 'repo-b']
+      })).toString('base64')
+
+      stubContext.octokit.repos.getContent = jest.fn().mockResolvedValue({
+        data: { content: previousContent }
+      })
+
+      // Neither repo matches current targeting
+      settings.subOrgConfigs = {}
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [
+          { path: '.github/suborgs/frontend.yml', name: 'frontend' },
+          { path: '.github/suborgs/frontend.yml', name: 'frontend' } // duplicate
+        ],
+        'prev-sha'
+      )
+
+      // Should be deduplicated
+      const repoACount = result.filter(r => r === 'repo-a').length
+      expect(repoACount).toBe(1)
+    })
+
+    it('handles 404 gracefully when previous file does not exist', async () => {
+      stubContext.octokit.repos.getContent = jest.fn().mockRejectedValue(
+        Object.assign(new Error('Not Found'), { status: 404 })
+      )
+
+      settings.subOrgConfigs = {}
+
+      const result = await settings.getReposRemovedFromSubOrgTargeting(
+        [{ path: '.github/suborgs/new-suborg.yml', name: 'new-suborg' }],
+        'prev-sha'
+      )
+
+      expect(result).toEqual([])
+    })
+  })
 }) // Settings Tests
