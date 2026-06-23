@@ -644,13 +644,13 @@ const SUBORG_EXPERT_SERVICES_PROPERTY_YML = SUBORG_EXPERT_SERVICES_YML.replace(
   'suborgproperties:\n  - ent-ownership: expert-services'
 )
 
-// Suborg config that narrows targeting to only demo-repo-service2 via
+// Suborg config that narrows targeting to only the 'test' repo via
 // suborgrepos. Used to test that repos dropping out of suborg targeting
 // (due to targeting rule changes in the suborg.yml) have their
 // suborg-applied rulesets removed.
 const SUBORG_EXPERT_SERVICES_NARROW_YML = SUBORG_EXPERT_SERVICES_YML.replace(
   'suborgteams:\n  - expert-services-developers',
-  'suborgrepos:\n  - demo-repo-service2'
+  'suborgrepos:\n  - test'
 )
 
 const REPO_DEMO_SERVICE1_ARCHIVED_YML = `# Safe-Settings Configuration
@@ -1423,7 +1423,7 @@ async function phase5Suborg () {
   const branch4 = 'smoke-test-phase5-narrow-targeting'
   await deleteBranch(ORG, ADMIN_REPO, branch4)
   await createBranch(ORG, ADMIN_REPO, branch4)
-  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs/expert-services.yml`, SUBORG_EXPERT_SERVICES_NARROW_YML, branch4, 'Narrow suborg targeting to only demo-repo-service2')
+  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs/expert-services.yml`, SUBORG_EXPERT_SERVICES_NARROW_YML, branch4, 'Narrow suborg targeting to only test repo')
 
   const pr4 = await createPR(ORG, ADMIN_REPO, 'Smoke test: narrow suborg targeting (remove demo-repo-service1)', branch4, defaultBranch)
   log('Waiting for NOP check run on narrowed targeting...')
@@ -1442,10 +1442,10 @@ async function phase5Suborg () {
   }, { desc: 'suborg ruleset to be removed from demo-repo-service1 after targeting narrowed', timeout: 90000 })
   assert(demo1RulesetAfterNarrow === true, 'Suborg ruleset removed from demo-repo-service1 after targeting rule change')
 
-  const demo2RulesetAfterNarrow = await poll(async () => {
-    return await getRepoRuleset(ORG, 'demo-repo-service2', suborgRulesetName)
-  }, { desc: 'suborg ruleset retained on demo-repo-service2 after narrowing', timeout: 60000 })
-  assert(demo2RulesetAfterNarrow !== null, 'Suborg ruleset retained on demo-repo-service2 after targeting rule change')
+  const testRulesetAfterNarrow = await poll(async () => {
+    return await getRepoRuleset(ORG, 'test', suborgRulesetName)
+  }, { desc: 'suborg ruleset retained on test after narrowing', timeout: 60000 })
+  assert(testRulesetAfterNarrow !== null, 'Suborg ruleset retained on test after targeting rule change')
 
   // Restore team-targeted config for subsequent phases
   const branch5 = 'smoke-test-phase5-restore-after-narrow'

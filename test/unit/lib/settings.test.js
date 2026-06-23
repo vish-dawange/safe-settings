@@ -1415,14 +1415,16 @@ repository:
       settings = createSettings(stubConfig)
     })
 
-    it('returns empty array when no changedSubOrgs provided', async () => {
+    it('returns empty result when no changedSubOrgs provided', async () => {
       const result = await settings.getReposRemovedFromSubOrgTargeting([], 'prev-sha')
-      expect(result).toEqual([])
+      expect(result.repos).toEqual([])
+      expect(result.previousPluginSections).toEqual([])
     })
 
-    it('returns empty array when no baseRef provided', async () => {
+    it('returns empty result when no baseRef provided', async () => {
       const result = await settings.getReposRemovedFromSubOrgTargeting([{ path: '.github/suborgs/frontend.yml' }], null)
-      expect(result).toEqual([])
+      expect(result.repos).toEqual([])
+      expect(result.previousPluginSections).toEqual([])
     })
 
     it('identifies repos removed from suborgrepos targeting', async () => {
@@ -1460,8 +1462,9 @@ repository:
         'prev-sha'
       )
 
-      expect(result).toContain('repo-a')
-      expect(result).not.toContain('repo-b')
+      expect(result.repos).toContain('repo-a')
+      expect(result.repos).not.toContain('repo-b')
+      expect(result.previousPluginSections).toContain('teams')
     })
 
     it('identifies repos removed from suborgrepos glob targeting', async () => {
@@ -1493,9 +1496,9 @@ repository:
         'prev-sha'
       )
 
-      expect(result).toContain('team-b1')
-      expect(result).not.toContain('team-a1')
-      expect(result).not.toContain('other')
+      expect(result.repos).toContain('team-b1')
+      expect(result.repos).not.toContain('team-a1')
+      expect(result.repos).not.toContain('other')
     })
 
     it('identifies repos removed from suborgteams targeting', async () => {
@@ -1528,8 +1531,8 @@ repository:
         'prev-sha'
       )
 
-      expect(result).toContain('team-repo-2')
-      expect(result).not.toContain('team-repo-1')
+      expect(result.repos).toContain('team-repo-2')
+      expect(result.repos).not.toContain('team-repo-1')
     })
 
     it('identifies repos removed from suborgproperties targeting', async () => {
@@ -1562,8 +1565,8 @@ repository:
         'prev-sha'
       )
 
-      expect(result).toContain('prop-repo-2')
-      expect(result).not.toContain('prop-repo-1')
+      expect(result.repos).toContain('prop-repo-2')
+      expect(result.repos).not.toContain('prop-repo-1')
     })
 
     it('deduplicates removed repos across multiple suborg files', async () => {
@@ -1593,7 +1596,7 @@ repository:
       )
 
       // Should be deduplicated
-      const repoACount = result.filter(r => r === 'repo-a').length
+      const repoACount = result.repos.filter(r => r === 'repo-a').length
       expect(repoACount).toBe(1)
     })
 
@@ -1609,7 +1612,7 @@ repository:
         'prev-sha'
       )
 
-      expect(result).toEqual([])
+      expect(result).toEqual({ repos: [], previousPluginSections: [] })
     })
   })
 }) // Settings Tests
