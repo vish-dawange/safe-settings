@@ -337,6 +337,60 @@ Notes:
 > ⚠️ **Warning:**
 When `{{EXTERNALLY_DEFINED}}` is removed from an existing branch protection rule or ruleset configuration, the status checks in the existing rules in GitHub will revert to the checks that are defined in safe-settings. From this point onwards, all status checks configured through the GitHub UI will be reverted back to the safe-settings configuration.
 
+#### Referencing ruleset bypass actors and reviewers by name
+
+Rulesets normally require numeric ids for `bypass_actors[].actor_id` and for the
+team in `required_reviewers[].reviewer.id`. To avoid looking these ids up, you
+can reference them by name and safe-settings resolves them to the correct id
+before applying the ruleset:
+
+- `bypass_actors[].name` — an alternative to `actor_id`. The value is resolved
+  based on `actor_type`:
+  - `Team` → team slug
+  - `User` → username
+  - `Integration` → GitHub App slug
+  - `RepositoryRole` → role name. Built-in roles (`read`, `triage`, `write`,
+    `maintain`, `admin`) are mapped automatically; any other name is looked up
+    among the organization's custom repository roles.
+- `required_reviewers[].reviewer.slug` — an alternative to `reviewer.id`, the
+  slug of the reviewing team.
+
+```yaml
+rulesets:
+  - name: Main protection
+    target: branch
+    enforcement: active
+    bypass_actors:
+      - name: my-team         # resolved to actor_id
+        actor_type: Team
+        bypass_mode: always
+      - name: admin           # built-in repository role
+        actor_type: RepositoryRole
+        bypass_mode: always
+    rules:
+      - type: pull_request
+        parameters:
+          required_approving_review_count: 1
+          dismiss_stale_reviews_on_push: false
+          require_code_owner_review: false
+          require_last_push_approval: false
+          required_review_thread_resolution: false
+          required_reviewers:
+            - minimum_approvals: 1
+              file_patterns: ["*.js"]
+              reviewer:
+                slug: my-reviewers-team   # resolved to reviewer.id
+                type: Team
+```
+
+Notes:
+  - This is fully backward compatible. Existing policies that use `actor_id` /
+    `reviewer.id` continue to work unchanged, and numeric ids are never looked up.
+  - Provide either the name (`name` / `slug`) or the id (`actor_id` /
+    `reviewer.id`) for a given entry, not both. Specifying both is an error.
+  - If a name cannot be resolved to an id, the ruleset sync fails with a clear
+    error so the misconfiguration is surfaced rather than silently ignored.
+
 #### Status checks inheritance across scopes
 Refer to [Status checks](docs/status-checks.md).
 

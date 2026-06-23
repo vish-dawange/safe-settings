@@ -174,6 +174,19 @@
               "description": "Either `true` to enable the wiki for this repository or `false` to disable it.",
               "default": true
             },
+            "has_pull_requests": {
+              "type": "boolean",
+              "description": "Either `true` to allow pull requests for this repository or `false` to prevent pull requests.",
+              "default": true
+            },
+            "pull_request_creation_policy": {
+              "type": "string",
+              "description": "The policy that controls who can create pull requests for this repository: `all` or `collaborators_only`.",
+              "enum": [
+                "all",
+                "collaborators_only"
+              ]
+            },
             "is_template": {
               "type": "boolean",
               "description": "Either `true` to make this repo available as a template repository or `false` to prevent it.",
@@ -448,7 +461,12 @@
           },
           "permission": {
             "type": "string",
-            "description": "The permission to grant the team on this repository. We accept the following permissions to be set: `pull`, `triage`, `push`, `maintain`, `admin` and you can also specify a custom repository role name, if the owning organization has defined any."
+            "description": "**Closing down notice**. The permission that new repositories will be added to the team with when none is specified.",
+            "enum": [
+              "pull",
+              "push"
+            ],
+            "default": "pull"
           },
           "parent_team_id": {
             "type": "integer",
@@ -789,6 +807,10 @@
                     "exempt"
                   ],
                   "default": "always"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Human-friendly alternative to `actor_id`. The team slug, username, GitHub App slug, or repository role name (resolved using `actor_type`). Cannot be combined with `actor_id`."
                 }
               }
             }
@@ -1253,10 +1275,13 @@
                                     "enum": [
                                       "Team"
                                     ]
+                                  },
+                                  "slug": {
+                                    "type": "string",
+                                    "description": "Human-friendly alternative to `id`. The slug of the team that must review changes to matching files. Cannot be combined with `id`."
                                   }
                                 },
                                 "required": [
-                                  "id",
                                   "type"
                                 ]
                               }

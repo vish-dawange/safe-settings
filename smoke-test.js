@@ -11,6 +11,9 @@
  *   3. Run: `node smoke-test.js`
  *      Add --interactive to pause after each phase for manual validation.
  *      Set SMOKE_VERBOSE=1 for live safe-settings logs.
+ *      Optional (Phase 16 — ruleset name resolution): set SMOKE_NR_USER to a
+ *      username and/or SMOKE_NR_APP_SLUG to an installed GitHub App slug to also
+ *      exercise User and Integration bypass-actor name resolution.
  *
  * Auth:
  *   - Octokit (GitHub App): APP_ID + PRIVATE_KEY from .env — used for most operations.
@@ -69,6 +72,10 @@ const PRIVATE_KEY = (process.env.PRIVATE_KEY || '').replace(/\\n/g, '\n')
 
 const TEST_REPOS = ['test', 'demo-repo-service1', 'demo-repo-service2', 'combined-settings-repo']
 const TEST_TEAMS = ['AD-GRP-PAYMENTS-PLATFORM-OWNERS', 'awesometeam-a-approvers', 'jefeish-edj-test']
+
+// Principals created on demand for the ruleset name-resolution phase (Phase 16)
+const SMOKE_NR_TEAM = 'safe-settings-smoke-nr-team'
+const SMOKE_NR_ROLE = 'safe-settings-smoke-nr-role'
 
 const POLL_INTERVAL_MS = 5000
 const MAX_POLL_MS = 120000
@@ -287,6 +294,17 @@ async function deleteRepo (owner, repo) {
 
 async function deleteTeam (org, teamSlug) {
   try { await octokit.rest.teams.deleteInOrg({ org, team_slug: teamSlug }) } catch { /* ok */ }
+}
+
+async function ensureTeam (org, name) {
+  try {
+    const { data } = await octokit.rest.teams.getByName({ org, team_slug: name })
+    return data
+  } catch { /* team doesn't exist yet */ }
+  try {
+    const { data } = await octokit.rest.teams.create({ org, name, privacy: 'closed' })
+    return data
+  } catch { return null }
 }
 
 async function getCustomRepositoryRole (org, name) {
@@ -2289,6 +2307,7 @@ async function teardown () {
 
   log('Deleting test teams...')
   for (const team of TEST_TEAMS) { await deleteTeam(ORG, team.toLowerCase()) }
+  try { await deleteTeam(ORG, SMOKE_NR_TEAM) } catch { /* ok */ }
 
   log('Deleting custom repository role...')
   try { await deleteCustomRepositoryRole(ORG, 'security-engineer') } catch { /* ok */ }
@@ -2296,6 +2315,7 @@ async function teardown () {
   try { await deleteCustomRepositoryRole(ORG, 'smoke-crr-managed') } catch { /* ok */ }
   try { await deleteCustomRepositoryRole(ORG, 'smoke-crr-external') } catch { /* ok */ }
   try { await deleteCustomRepositoryRole(ORG, 'smoke-crr-disabled') } catch { /* ok */ }
+  try { await deleteCustomRepositoryRole(ORG, SMOKE_NR_ROLE) } catch { /* ok */ }
 
   log('Deleting org rulesets...')
   try {
@@ -2306,6 +2326,7 @@ async function teardown () {
   try { await deleteOrgRuleset(ORG, 'smoke-ruleset-managed') } catch { /* ok */ }
   try { await deleteOrgRuleset(ORG, 'smoke-ruleset-external') } catch { /* ok */ }
   try { await deleteOrgRuleset(ORG, 'smoke-ruleset-disabled') } catch { /* ok */ }
+  try { await deleteOrgRuleset(ORG, 'smoke-combined-org-ruleset') } catch { /* ok */ }
 
   log('Resetting admin repo settings...')
   const defaultBranch = await getDefaultBranch()
@@ -2320,6 +2341,29 @@ async function phase15RulesetArrayDrift () {
   logPhase('Phase 15: Drift remediation - Ruleset array fields (bypass_actors, rules, required_reviewers)')
 
   if (!GH_TOKEN) throw new Error('GH_TOKEN env var is required for drift tests (set to a fine-grained PAT)')
+
+  // ── 15-setup: Restore full test.yml (earlier phases replace it with minimal configs) ──
+  // Phases 12d and 13 overwrite repos/test.yml with configs that omit rulesets,
+  // causing safe-settings to delete "synk" from the test repo. Restore it first.
+  {
+    log('15-setup: Restoring repos/test.yml to full config (ensures "synk" ruleset exists)...')
+    const defaultBranch = await getDefaultBranch()
+    const branch = 'smoke-test-phase15-setup'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_TEST_YML, branch, '15-setup: restore full test repo config with rulesets')
+    const pr = await createPR(ORG, ADMIN_REPO, '15-setup: restore test.yml with rulesets', branch, defaultBranch)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    const synkReady = await poll(async () => {
+      return await getRepoRuleset(ORG, 'test', 'synk')
+    }, { desc: '"synk" ruleset to be (re)created after test.yml restore', timeout: 90000 })
+    assert(synkReady !== null, '15-setup: "synk" ruleset present after restoring repos/test.yml')
+    if (!synkReady) return // cannot proceed without the ruleset
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
 
   // ── 15a: Remove bypass_actors from "synk" ruleset ──────────────────────────
   // The test repo "synk" ruleset has bypass_actors configured.
@@ -2455,6 +2499,147 @@ async function phase15RulesetArrayDrift () {
   }
 }
 
+// Builds a branch ruleset that references its bypass actors and required
+// reviewer by name (not numeric id), so safe-settings has to resolve them.
+//   actors: [{ name, actor_type, bypass_mode }]
+function buildNameResolutionRuleset (actors) {
+  const bypassActorsYml = actors.map(a =>
+`    - name: ${a.name}
+      actor_type: ${a.actor_type}
+      bypass_mode: ${a.bypass_mode}`).join('\n')
+
+  return `
+- name: smoke-name-resolution
+  target: branch
+  enforcement: active
+  bypass_actors:
+${bypassActorsYml}
+  conditions:
+    ref_name:
+      include: ["~DEFAULT_BRANCH"]
+      exclude: []
+  rules:
+    - type: pull_request
+      parameters:
+        dismiss_stale_reviews_on_push: false
+        require_code_owner_review: false
+        require_last_push_approval: false
+        required_approving_review_count: 1
+        required_review_thread_resolution: false
+        required_reviewers:
+          - minimum_approvals: 1
+            file_patterns:
+              - "*.js"
+            reviewer:
+              slug: ${SMOKE_NR_TEAM}
+              type: Team
+`
+}
+
+async function phase16RulesetNameResolution () {
+  logPhase('Phase 16: Ruleset bypass actor.name + reviewer.slug resolution')
+  const defaultBranch = await getDefaultBranch()
+  const RULESET = 'smoke-name-resolution'
+
+  // Ensure the principals exist so safe-settings can resolve names → ids.
+  log('Ensuring smoke team and custom repository role exist...')
+  const team = await ensureTeam(ORG, SMOKE_NR_TEAM)
+  if (!team) { logFail('Phase 16: could not create/find smoke team'); return }
+  const teamId = team.id
+  const role = await createCustomRepositoryRole(ORG, SMOKE_NR_ROLE, 'safe-settings smoke name-resolution role')
+  if (!role) { logFail('Phase 16: could not create custom repository role'); return }
+  const roleId = role.id
+  log(`Smoke team id=${teamId}, custom role id=${roleId}`)
+
+  // Optional principals — only exercised when the env vars are provided.
+  const extraActors = []
+  if (process.env.SMOKE_NR_USER) extraActors.push({ name: process.env.SMOKE_NR_USER, actor_type: 'User', bypass_mode: 'always' })
+  if (process.env.SMOKE_NR_APP_SLUG) extraActors.push({ name: process.env.SMOKE_NR_APP_SLUG, actor_type: 'Integration', bypass_mode: 'always' })
+
+  // ── 16a: Create a ruleset entirely by name (Team, built-in + custom role, reviewer slug) ──
+  const createActors = [
+    { name: SMOKE_NR_TEAM, actor_type: 'Team', bypass_mode: 'always' },
+    { name: 'maintain', actor_type: 'RepositoryRole', bypass_mode: 'always' },
+    { name: SMOKE_NR_ROLE, actor_type: 'RepositoryRole', bypass_mode: 'pull_request' },
+    ...extraActors
+  ]
+  {
+    const branch = 'smoke-test-phase16a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_TEST_YML + buildNameResolutionRuleset(createActors), branch, '16a: add name-resolution ruleset')
+    const pr = await createPR(ORG, ADMIN_REPO, '16a: ruleset bypass actor.name + reviewer.slug', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '16a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `16a: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    const details = await poll(async () => {
+      const rs = await getRepoRuleset(ORG, 'test', RULESET)
+      if (!rs) return null
+      return await getRepoRulesetDetails(ORG, 'test', rs.id)
+    }, { desc: 'name-resolution ruleset to be created', timeout: 90000 })
+
+    assert(details !== null, '16a: ruleset created from name-based config')
+    if (details) {
+      const actors = details.bypass_actors || []
+      assert(actors.some(a => a.actor_type === 'Team' && a.actor_id === teamId), `16a: Team name resolved to actor_id ${teamId}`)
+      assert(actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === 4), '16a: built-in role "maintain" resolved to actor_id 4')
+      assert(actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === roleId), `16a: custom role resolved to actor_id ${roleId}`)
+      // GitHub only ever stores ids; the human-friendly alias must not leak through.
+      assert(actors.every(a => a.name === undefined), '16a: no "name" alias present in applied ruleset (resolved to ids)')
+
+      const prRule = (details.rules || []).find(r => r.type === 'pull_request')
+      const reviewers = prRule && prRule.parameters && prRule.parameters.required_reviewers
+      const reviewer = Array.isArray(reviewers) && reviewers[0] && reviewers[0].reviewer
+      assert(reviewer && reviewer.id === teamId, `16a: reviewer.slug resolved to team id ${teamId}`)
+
+      if (process.env.SMOKE_NR_USER) assert(actors.some(a => a.actor_type === 'User' && Number.isInteger(a.actor_id)), '16a: User name resolved to actor_id')
+      if (process.env.SMOKE_NR_APP_SLUG) assert(actors.some(a => a.actor_type === 'Integration' && Number.isInteger(a.actor_id)), '16a: Integration slug resolved to actor_id')
+    }
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 16b: Modify the ruleset by name — swap built-in maintain(4) → admin(5) ──
+  const modifyActors = createActors.map(a =>
+    (a.actor_type === 'RepositoryRole' && a.name === 'maintain') ? { ...a, name: 'admin' } : a)
+  {
+    const branch = 'smoke-test-phase16b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/test.yml`, REPO_TEST_YML + buildNameResolutionRuleset(modifyActors), branch, '16b: modify name-resolution ruleset')
+    const pr = await createPR(ORG, ADMIN_REPO, '16b: modify ruleset bypass actor by name', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '16b: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `16b: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS)
+
+    const updated = await poll(async () => {
+      const rs = await getRepoRuleset(ORG, 'test', RULESET)
+      if (!rs) return null
+      const d = await getRepoRulesetDetails(ORG, 'test', rs.id)
+      const actors = (d && d.bypass_actors) || []
+      const hasAdmin = actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === 5)
+      const hasMaintain = actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === 4)
+      return (hasAdmin && !hasMaintain) ? d : null
+    }, { desc: 'ruleset to be updated with admin role (5) replacing maintain (4)', timeout: 90000 })
+
+    assert(updated !== null, '16b: ruleset modified by name — maintain(4) replaced with admin(5)')
+    if (updated) {
+      const actors = updated.bypass_actors || []
+      assert(actors.some(a => a.actor_type === 'Team' && a.actor_id === teamId), '16b: Team bypass actor preserved across modification')
+      assert(actors.some(a => a.actor_type === 'RepositoryRole' && a.actor_id === roleId), '16b: custom role bypass actor preserved across modification')
+    }
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main () {
@@ -2505,7 +2690,8 @@ async function main () {
       ['Phase 12: rulesets', phase12Rulesets],
       ['Phase 13: variables', phase13Variables],
       ['Phase 14: regressions', phase14RegressionCoverage],
-      ['Phase 15: Ruleset array drift', phase15RulesetArrayDrift]
+      ['Phase 15: Ruleset array drift', phase15RulesetArrayDrift],
+      ['Phase 16: Ruleset name/slug resolution', phase16RulesetNameResolution]
     ]
 
     // When --phase is given, only run setup (phase 0) + the requested phase(s).

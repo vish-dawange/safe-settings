@@ -262,6 +262,23 @@ rulesets:
         actor_type: Integration
         bypass_mode: always
 
+      # Instead of looking up numeric ids, you can use the `name` field to
+      # reference an actor by name. safe-settings resolves it to `actor_id`
+      # based on `actor_type` before applying the ruleset:
+      #   - Team           -> team slug
+      #   - User           -> username
+      #   - Integration    -> GitHub App slug
+      #   - RepositoryRole -> role name (built-in: read, triage, write,
+      #                       maintain, admin; or a custom role name)
+      # Provide either `name` or `actor_id`, not both.
+      - name: my-team
+        actor_type: Team
+        bypass_mode: always
+
+      - name: admin
+        actor_type: RepositoryRole
+        bypass_mode: always
+
     conditions:
       # Parameters for a repository ruleset ref name condition
       ref_name:
@@ -322,6 +339,17 @@ rulesets:
           # All conversations on code must be resolved before a pull
           # request can be merged.
           required_review_thread_resolution: true
+          # A collection of reviewers and the file patterns they must
+          # approve. Each reviewer is a team. Use `id` (team id) or, to
+          # avoid looking up the id, `slug` (team slug) which
+          # safe-settings resolves before applying the ruleset. Provide
+          # either `slug` or `id`, not both.
+          required_reviewers:
+            - minimum_approvals: 1
+              file_patterns: ["*.js"]
+              reviewer:
+                slug: my-reviewers-team
+                type: Team
 
       # Choose which status checks must pass before branches can be merged
       # into a branch that matches this rule. When enabled, commits must
