@@ -100,7 +100,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
         }
       }
 
-      return Settings.syncSelectedRepos(nop, context, repos, subOrgs, config, ref, baseConfig)
+      return Settings.syncSelectedRepos(nop, context, repos, subOrgs, config, ref, baseConfig, baseRef)
     } catch (e) {
       if (nop) {
         let filename = env.SETTINGS_FILE_PATH
@@ -303,7 +303,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     }
 
     if (repoChanges.length > 0 || subOrgChanges.length > 0) {
-      return syncSelectedSettings(false, context, repoChanges, subOrgChanges)
+      return syncSelectedSettings(false, context, repoChanges, subOrgChanges, payload.after, payload.before)
     }
 
     robot.log.debug(`No changes in '${Settings.FILE_PATH}' detected, returning...`)
