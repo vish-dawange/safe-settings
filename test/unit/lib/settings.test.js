@@ -1444,6 +1444,12 @@ repository:
         return Promise.resolve({ data: { content: currentContent } })
       })
 
+      // Mock installation repos for glob resolution
+      stubContext.octokit.paginate = jest.fn().mockResolvedValue([
+        { name: 'repo-a', owner: { login: 'test' } },
+        { name: 'repo-b', owner: { login: 'test' } }
+      ])
+
       // Current subOrgConfigs only has repo-b (repo-a was removed from targeting)
       settings.subOrgConfigs = {
         'repo-b': { source: '.github/suborgs/frontend.yml' }
@@ -1568,6 +1574,12 @@ repository:
       stubContext.octokit.repos.getContent = jest.fn().mockResolvedValue({
         data: { content: previousContent }
       })
+
+      // Mock installation repos for glob resolution
+      stubContext.octokit.paginate = jest.fn().mockResolvedValue([
+        { name: 'repo-a', owner: { login: 'test' } },
+        { name: 'repo-b', owner: { login: 'test' } }
+      ])
 
       // Neither repo matches current targeting
       settings.subOrgConfigs = {}
