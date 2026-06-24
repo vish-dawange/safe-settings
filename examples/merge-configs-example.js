@@ -4,7 +4,7 @@
  * Simple example demonstrating the mergeConfigs function
  */
 
-const mergeConfigs = require('../lib/mergeConfigs')
+const { mergeConfigs } = require('../lib/hubSyncHandler')
 
 console.log('═══════════════════════════════════════════════════')
 console.log('  mergeConfigs() Function Examples')
@@ -110,6 +110,127 @@ console.log(JSON.stringify(complexReplaced, null, 2))
 console.log('\nResult with APPEND mode:')
 const complexAppended = mergeConfigs(complex1, complex2, false)
 console.log(JSON.stringify(complexAppended, null, 2))
+
+// Example 5: Labels - Named Objects with Smart Merging
+console.log('\n\nExample 5: Labels with Named Objects (Smart Merge by Name)')
+console.log('─────────────────────────────────────────────────\n')
+
+const baseLabels = `
+labels:
+  include:
+    - name: bug
+      color: CC0000
+      description: An issue with the system
+    - name: feature
+      color: "336699"
+      description: New functionality
+    - name: documentation
+      color: "0075ca"
+      description: Documentation improvements
+`
+
+const overlayLabels = `
+labels:
+  include:
+    - name: bug
+      color: FF0000
+      description: Bug reports and fixes
+    - name: enhancement
+      color: "84b6eb"
+      description: New feature or request
+`
+
+console.log('Base Config (3 labels):')
+console.log(baseLabels)
+console.log('Overlay Config (2 labels):')
+console.log(overlayLabels)
+
+console.log('\nResult with REPLACE mode (replaceArrays=true):')
+const labelsReplaced = mergeConfigs(baseLabels, overlayLabels, true)
+console.log(JSON.stringify(labelsReplaced, null, 2))
+console.log('✓ Entire labels array is REPLACED - only overlay labels remain\n')
+
+console.log('Result with SMART MERGE mode (replaceArrays=false):')
+const labelsSmartMerged = mergeConfigs(baseLabels, overlayLabels, false)
+console.log(JSON.stringify(labelsSmartMerged, null, 2))
+console.log('✓ Labels matched by NAME:')
+console.log('  - "bug" label UPDATED (color & description changed)')
+console.log('  - "feature" and "documentation" PRESERVED from base')
+console.log('  - "enhancement" ADDED from overlay')
+console.log('✓ Sub-properties (color, description) are merged per label\n')
+
+// Example 6: Primitive Values - Simple Override
+console.log('\n\nExample 6: Primitive Values (Strings, Numbers, Booleans)')
+console.log('─────────────────────────────────────────────────\n')
+
+const basePrimitives = `
+policy_name: P1
+role: "master controller"
+version: 1.2
+enabled: true
+max_retries: 3
+`
+
+const overlayPrimitives = `
+policy_name: P2
+version: 2.0
+description: "Updated policy"
+`
+
+console.log('Base Config:')
+console.log(basePrimitives)
+console.log('Overlay Config:')
+console.log(overlayPrimitives)
+
+console.log('Result (both modes behave the same for primitives):')
+const primitivesMerged = mergeConfigs(basePrimitives, overlayPrimitives, true)
+console.log(JSON.stringify(primitivesMerged, null, 2))
+console.log('✓ Primitive values from overlay OVERRIDE base values:')
+console.log('  - policy_name: P1 → P2 (overridden)')
+console.log('  - version: 1.2 → 2.0 (overridden)')
+console.log('  - role: "master controller" (preserved - not in overlay)')
+console.log('  - enabled: true (preserved - not in overlay)')
+console.log('  - max_retries: 3 (preserved - not in overlay)')
+console.log('  - description: "Updated policy" (added from overlay)')
+console.log('✓ Result: overlay values replace base, base-only values preserved\n')
+
+// Example 7: Array Deduplication
+console.log('\nExample 7: Array of Primitives (Deduplication)')
+console.log('─────────────────────────────────────────────────\n')
+
+const baseTags = `
+tags:
+  - typescript
+  - nodejs
+  - api
+  - testing
+`
+
+const overlayTags = `
+tags:
+  - nodejs
+  - docker
+  - kubernetes
+`
+
+console.log('Base Config:')
+console.log(baseTags)
+console.log('Overlay Config:')
+console.log(overlayTags)
+
+console.log('\nResult with REPLACE mode (replaceArrays=true):')
+const tagsReplaced = mergeConfigs(baseTags, overlayTags, true)
+console.log(JSON.stringify(tagsReplaced, null, 2))
+console.log('✓ Base tags REPLACED - only overlay tags remain\n')
+
+console.log('Result with SMART MERGE mode (replaceArrays=false):')
+const tagsSmartMerged = mergeConfigs(baseTags, overlayTags, false)
+console.log(JSON.stringify(tagsSmartMerged, null, 2))
+console.log('✓ Primitive arrays DEDUPLICATED:')
+console.log('  - All base tags PRESERVED: typescript, nodejs, api, testing')
+console.log('  - Duplicate "nodejs" NOT added again')
+console.log('  - Unique overlay tags ADDED: docker, kubernetes')
+console.log('✓ Result: union of both arrays with no duplicates\n')
 
 console.log('\n═══════════════════════════════════════════════════')
 console.log('  Usage Summary')

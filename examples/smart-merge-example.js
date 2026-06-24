@@ -20,7 +20,7 @@
  * without losing data or creating duplicates.
  */
 
-const mergeConfigs = require('../lib/mergeConfigs')
+const { mergeConfigs } = require('../lib/hubSyncHandler')
 
 console.log('='.repeat(60))
 console.log('Smart Array Merge Examples')

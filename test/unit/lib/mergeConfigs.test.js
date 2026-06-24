@@ -1,4 +1,4 @@
-const mergeConfigs = require('../../../lib/mergeConfigs')
+const { mergeConfigs } = require('../../../lib/hubSyncHandler')
 
 describe('mergeConfigs', () => {
   describe('Array handling', () => {
@@ -220,6 +220,233 @@ repository:
           private: true,
           visibility: 'internal'
         }
+      })
+    })
+  })
+
+  describe('Combined arrays and primitives', () => {
+    it('should merge primitives and object arrays together (replace mode)', () => {
+      const json1 = `
+policy_name: P1
+version: 1.2
+enabled: true
+labels:
+  - name: bug
+    color: red
+  - name: feature
+    color: blue
+collaborators:
+  - username: alice
+    permission: push
+`
+
+      const json2 = `
+policy_name: P2
+description: "Updated policy"
+labels:
+  - name: enhancement
+    color: green
+collaborators:
+  - username: alice
+    permission: admin
+  - username: bob
+    permission: pull
+`
+
+      const result = mergeConfigs(json1, json2, true)
+      expect(result).toEqual({
+        policy_name: 'P2',
+        version: 1.2,
+        enabled: true,
+        description: 'Updated policy',
+        labels: [
+          { name: 'enhancement', color: 'green' }
+        ],
+        collaborators: [
+          { username: 'alice', permission: 'admin' },
+          { username: 'bob', permission: 'pull' }
+        ]
+      })
+    })
+
+    it('should merge primitives and object arrays together (smart merge mode)', () => {
+      const json1 = `
+policy_name: P1
+version: 1.2
+enabled: true
+labels:
+  - name: bug
+    color: red
+    priority: high
+  - name: feature
+    color: blue
+collaborators:
+  - username: alice
+    permission: push
+`
+
+      const json2 = `
+policy_name: P2
+description: "Updated policy"
+labels:
+  - name: bug
+    color: darkred
+  - name: enhancement
+    color: green
+collaborators:
+  - username: alice
+    permission: admin
+  - username: bob
+    permission: pull
+`
+
+      const result = mergeConfigs(json1, json2, false)
+      expect(result).toEqual({
+        policy_name: 'P2',
+        version: 1.2,
+        enabled: true,
+        description: 'Updated policy',
+        labels: [
+          { name: 'bug', color: 'darkred', priority: 'high' },
+          { name: 'feature', color: 'blue' },
+          { name: 'enhancement', color: 'green' }
+        ],
+        collaborators: [
+          { username: 'alice', permission: 'admin' },
+          { username: 'bob', permission: 'pull' }
+        ]
+      })
+    })
+
+    it('should handle mixed primitive arrays and object arrays (smart merge)', () => {
+      const json1 = `
+name: Project A
+tags:
+  - typescript
+  - nodejs
+labels:
+  - name: bug
+    color: red
+teams:
+  - dev-team
+  - qa-team
+`
+
+      const json2 = `
+name: Project B
+tags:
+  - nodejs
+  - docker
+labels:
+  - name: bug
+    color: blue
+  - name: feature
+    color: green
+teams:
+  - qa-team
+  - ops-team
+`
+
+      const result = mergeConfigs(json1, json2, false)
+      expect(result).toEqual({
+        name: 'Project B',
+        tags: ['typescript', 'nodejs', 'docker'],
+        labels: [
+          { name: 'bug', color: 'blue' },
+          { name: 'feature', color: 'green' }
+        ],
+        teams: ['dev-team', 'qa-team', 'ops-team']
+      })
+    })
+
+    it('should handle deeply nested structures with primitives and arrays', () => {
+      const json1 = `
+config:
+  version: 1.0
+  settings:
+    security:
+      enabled: true
+      level: high
+    features:
+      - authentication
+      - authorization
+  policies:
+    - name: default
+      priority: 1
+`
+
+      const json2 = `
+config:
+  version: 2.0
+  settings:
+    security:
+      level: critical
+    features:
+      - authorization
+      - monitoring
+  policies:
+    - name: default
+      priority: 5
+      description: Updated policy
+    - name: custom
+      priority: 2
+`
+
+      const result = mergeConfigs(json1, json2, false)
+      expect(result).toEqual({
+        config: {
+          version: 2.0,
+          settings: {
+            security: {
+              enabled: true,
+              level: 'critical'
+            },
+            features: ['authentication', 'authorization', 'monitoring']
+          },
+          policies: [
+            { name: 'default', priority: 5, description: 'Updated policy' },
+            { name: 'custom', priority: 2 }
+          ]
+        }
+      })
+    })
+
+    it('should preserve primitives when merging complex nested arrays', () => {
+      const json1 = `
+organization: acme-corp
+type: enterprise
+max_repos: 100
+members:
+  - username: alice
+    role: admin
+    active: true
+  - username: bob
+    role: member
+    active: true
+`
+
+      const json2 = `
+type: organization
+description: ACME Corporation
+members:
+  - username: alice
+    role: owner
+  - username: charlie
+    role: member
+    active: false
+`
+
+      const result = mergeConfigs(json1, json2, false)
+      expect(result).toEqual({
+        organization: 'acme-corp',
+        type: 'organization',
+        max_repos: 100,
+        description: 'ACME Corporation',
+        members: [
+          { username: 'alice', role: 'owner', active: true },
+          { username: 'bob', role: 'member', active: true },
+          { username: 'charlie', role: 'member', active: false }
+        ]
       })
     })
   })

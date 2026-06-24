@@ -15,7 +15,6 @@ let deploymentConfig
 
 module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) => {
   let appSlug = 'safe-settings'
-<<<<<<< HEAD
 
   // Initialize all routes (static UI + API) via centralized module
   setupRoutes(robot, getRouter)
@@ -24,9 +23,6 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
   initCache(robot)
 
   async function syncAllSettings (nop, context, repo = context.repo(), ref) {
-=======
-  async function syncAllSettings (nop, context, repo = context.repo(), ref, baseRef, changedFiles = {}) {
->>>>>>> origin/decyjphr-fix-suborg-targeting-removal
     try {
       deploymentConfig = await loadYamlFileSystem()
       robot.log.debug(`deploymentConfig is ${JSON.stringify(deploymentConfig)}`)
