@@ -644,6 +644,15 @@ const SUBORG_EXPERT_SERVICES_PROPERTY_YML = SUBORG_EXPERT_SERVICES_YML.replace(
   'suborgproperties:\n  - ent-ownership: expert-services'
 )
 
+// Suborg config that narrows targeting to only the 'test' repo via
+// suborgrepos. Used to test that repos dropping out of suborg targeting
+// (due to targeting rule changes in the suborg.yml) have their
+// suborg-applied rulesets removed.
+const SUBORG_EXPERT_SERVICES_NARROW_YML = SUBORG_EXPERT_SERVICES_YML.replace(
+  'suborgteams:\n  - expert-services-developers',
+  'suborgrepos:\n  - test'
+)
+
 const REPO_DEMO_SERVICE1_ARCHIVED_YML = `# Safe-Settings Configuration
 repository:
   name: demo-repo-service1
@@ -1404,9 +1413,61 @@ async function phase5Suborg () {
   if (!await safeMerge(ORG, ADMIN_REPO, pr3.number)) return
   await sleep(WEBHOOK_SETTLE_MS)
 
+  // ── Sub-test: suborg targeting rule change removes rulesets from dropped repos ──
+  log('Verifying suborg ruleset is on demo-repo-service1 before targeting change...')
+  const demo1RulesetBeforeNarrow = await poll(async () => {
+    return await getRepoRuleset(ORG, 'demo-repo-service1', suborgRulesetName)
+  }, { desc: 'suborg ruleset on demo-repo-service1 before narrowing', timeout: 90000 })
+  assert(demo1RulesetBeforeNarrow !== null, 'Suborg ruleset present on demo-repo-service1 before targeting change')
+
+  const branch4 = 'smoke-test-phase5-narrow-targeting'
+  await deleteBranch(ORG, ADMIN_REPO, branch4)
+  await createBranch(ORG, ADMIN_REPO, branch4)
+  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs/expert-services.yml`, SUBORG_EXPERT_SERVICES_NARROW_YML, branch4, 'Narrow suborg targeting to only test repo')
+
+  const pr4 = await createPR(ORG, ADMIN_REPO, 'Smoke test: narrow suborg targeting (remove demo-repo-service1)', branch4, defaultBranch)
+  log('Waiting for NOP check run on narrowed targeting...')
+  await sleep(WEBHOOK_SETTLE_MS)
+  const checkRun4 = await waitForCheckRun(ORG, ADMIN_REPO, pr4.head.sha)
+  assert(checkRun4 !== null, 'Check run completed for narrowed targeting')
+  if (checkRun4) assert(checkRun4.conclusion === 'success', `Check run conclusion is success (got: ${checkRun4.conclusion})`)
+
+  if (!await safeMerge(ORG, ADMIN_REPO, pr4.number)) return
+  await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+  log('Checking suborg ruleset removed from demo-repo-service1 after targeting change...')
+  const demo1RulesetAfterNarrow = await poll(async () => {
+    const ruleset = await getRepoRuleset(ORG, 'demo-repo-service1', suborgRulesetName)
+    return ruleset === null ? true : null
+  }, { desc: 'suborg ruleset to be removed from demo-repo-service1 after targeting narrowed', timeout: 90000 })
+  assert(demo1RulesetAfterNarrow === true, 'Suborg ruleset removed from demo-repo-service1 after targeting rule change')
+
+  const testRulesetAfterNarrow = await poll(async () => {
+    return await getRepoRuleset(ORG, 'test', suborgRulesetName)
+  }, { desc: 'suborg ruleset retained on test after narrowing', timeout: 60000 })
+  assert(testRulesetAfterNarrow !== null, 'Suborg ruleset retained on test after targeting rule change')
+
+  // Restore team-targeted config for subsequent phases
+  const branch5 = 'smoke-test-phase5-restore-after-narrow'
+  await deleteBranch(ORG, ADMIN_REPO, branch5)
+  await createBranch(ORG, ADMIN_REPO, branch5)
+  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs/expert-services.yml`, SUBORG_EXPERT_SERVICES_YML, branch5, 'Restore team-targeted expert-services suborg config after narrow test')
+
+  const pr5 = await createPR(ORG, ADMIN_REPO, 'Smoke test: restore suborg after narrow targeting test', branch5, defaultBranch)
+  log('Waiting for NOP check run on restore...')
+  await sleep(WEBHOOK_SETTLE_MS)
+  const checkRun5 = await waitForCheckRun(ORG, ADMIN_REPO, pr5.head.sha)
+  assert(checkRun5 !== null, 'Check run completed for restore after narrow')
+  if (checkRun5) assert(checkRun5.conclusion === 'success', `Check run conclusion is success (got: ${checkRun5.conclusion})`)
+
+  if (!await safeMerge(ORG, ADMIN_REPO, pr5.number)) return
+  await sleep(WEBHOOK_SETTLE_MS)
+
   await deleteBranch(ORG, ADMIN_REPO, branch)
   await deleteBranch(ORG, ADMIN_REPO, branch2)
   await deleteBranch(ORG, ADMIN_REPO, branch3)
+  await deleteBranch(ORG, ADMIN_REPO, branch4)
+  await deleteBranch(ORG, ADMIN_REPO, branch5)
 }
 
 async function phase6Archive () {
