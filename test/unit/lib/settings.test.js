@@ -1096,11 +1096,11 @@ repository:
   describe('additive_plugins', () => {
     // ── Settings.ADDITIVE_PLUGINS constant ───────────────────────────────
     describe('Settings.ADDITIVE_PLUGINS', () => {
-      it('28. contains all 10 Diffable-extending plugin names', () => {
+      it('28. contains all 11 additive plugin names', () => {
         const expected = new Set([
           'labels', 'collaborators', 'teams', 'milestones', 'autolinks',
           'environments', 'custom_properties', 'variables', 'rulesets',
-          'custom_repository_roles'
+          'custom_repository_roles', 'app_installations'
         ])
         expect(Settings.ADDITIVE_PLUGINS).toEqual(expected)
       })
@@ -1126,12 +1126,12 @@ repository:
         expect(result).toEqual(new Set(['labels', 'teams', 'milestones']))
       })
 
-      it('32. all 10 Diffable plugins are accepted without error', () => {
+      it('32. all 11 additive plugins are accepted without error', () => {
         const all = [...Settings.ADDITIVE_PLUGINS]
         const settings = createSettings({ additive_plugins: all })
         const logErrorSpy = jest.spyOn(settings, 'logError').mockImplementation(() => {})
         const result = settings.normalizeAdditivePlugins()
-        expect(result.size).toBe(10)
+        expect(result.size).toBe(11)
         expect(logErrorSpy).not.toHaveBeenCalled()
         logErrorSpy.mockRestore()
       })

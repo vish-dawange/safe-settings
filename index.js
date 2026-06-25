@@ -21,6 +21,9 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       const config = Object.assign({}, deploymentConfig, runtimeConfig)
       robot.log.debug(`config for ref ${ref} is ${JSON.stringify(config)}`)
 
+      // Enrich context with enterprise info for app installation management
+      await enrichContextWithEnterprise(context)
+
       // Load base branch config for NOP filtering (only show PR-introduced changes)
       let baseConfig = null
       if (nop && baseRef) {
@@ -142,6 +145,26 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       }
     }
   }
+  /**
+   * Enriches the context with enterprise info for app installation management.
+   * Extracts enterprise slug from the webhook payload and creates an
+   * app-authenticated Octokit client for enterprise API calls.
+   *
+   * @param {object} context - Probot context
+   */
+  async function enrichContextWithEnterprise (context) {
+    const { payload } = context
+    const enterprise = payload.enterprise || (payload.installation && payload.installation.enterprise)
+    if (enterprise && enterprise.slug) {
+      context.enterpriseSlug = enterprise.slug
+      try {
+        context.appGithub = await robot.auth()
+      } catch (e) {
+        robot.log.debug(`Could not create app-authenticated client for enterprise: ${e.message}`)
+      }
+    }
+  }
+
   /**
    * Loads the deployment config file from file system
    * Do this once when the app starts and then return the cached value
@@ -480,6 +503,55 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       const repo = { repo: payload.changes.repository.name.from, owner: payload.repository.owner.login }
       return renameSync(false, context, repo, rename)
     }
+  })
+
+  // ────────────────────────────────────────────────────────────────────────
+  // App installation drift detection handlers
+  // ────────────────────────────────────────────────────────────────────────
+
+  const installation_change_events = [
+    'installation.repositories_added',
+    'installation.repositories_removed'
+  ]
+
+  robot.on(installation_change_events, async context => {
+    const { payload } = context
+    const { sender } = payload
+    robot.log.debug('App installation repos changed by ', JSON.stringify(sender))
+    if (sender.type === 'Bot') {
+      robot.log.debug('App installation repos changed by Bot')
+      return
+    }
+    robot.log.debug('App installation repos changed by a Human — triggering sync to revert drift')
+
+    // Build a context that targets the admin repo for this org
+    const orgLogin = payload.installation.account.login
+    const updatedContext = Object.assign({}, context, {
+      repo: () => { return { repo: env.ADMIN_REPO, owner: orgLogin } }
+    })
+    return syncAllSettings(false, updatedContext)
+  })
+
+  robot.on('installation_target', async context => {
+    const { payload } = context
+    const { sender } = payload
+    robot.log.debug('Installation target changed by ', JSON.stringify(sender))
+    if (sender.type === 'Bot') {
+      robot.log.debug('Installation target changed by Bot')
+      return
+    }
+    robot.log.debug('Installation target changed by a Human — triggering sync to revert drift')
+
+    const orgLogin = (payload.organization && payload.organization.login) ||
+      (payload.installation && payload.installation.account && payload.installation.account.login)
+    if (!orgLogin) {
+      robot.log.debug('Could not determine org login from installation_target event, skipping')
+      return
+    }
+    const updatedContext = Object.assign({}, context, {
+      repo: () => { return { repo: env.ADMIN_REPO, owner: orgLogin } }
+    })
+    return syncAllSettings(false, updatedContext)
   })
 
   robot.on('check_suite.requested', async context => {
