@@ -12,6 +12,7 @@ let deploymentConfig
 
 module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) => {
   let appSlug = 'safe-settings'
+  let cachedEnterpriseInstallationId = null
   async function syncAllSettings (nop, context, repo = context.repo(), ref, baseRef, changedFiles = {}) {
     try {
       deploymentConfig = await loadYamlFileSystem()
@@ -159,6 +160,12 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     if (enterprise && enterprise.slug) {
       context.enterpriseSlug = enterprise.slug
       try {
+        // Use cached enterprise installation ID if available
+        if (cachedEnterpriseInstallationId) {
+          context.appGithub = await robot.auth(cachedEnterpriseInstallationId)
+          return
+        }
+
         // Get a JWT-authenticated client to list all installations
         const appGithub = await robot.auth()
         const installations = await appGithub.paginate(
@@ -169,7 +176,8 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
           i => i.target_type === 'Enterprise' && i.account && i.account.slug === enterprise.slug
         )
         if (enterpriseInstallation) {
-          context.appGithub = await robot.auth(enterpriseInstallation.id)
+          cachedEnterpriseInstallationId = enterpriseInstallation.id
+          context.appGithub = await robot.auth(cachedEnterpriseInstallationId)
         } else {
           robot.log.debug(`No enterprise installation found for slug '${enterprise.slug}'. App installation management will not be available.`)
         }
