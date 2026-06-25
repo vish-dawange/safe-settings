@@ -147,8 +147,9 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
   }
   /**
    * Enriches the context with enterprise info for app installation management.
-   * Extracts enterprise slug from the webhook payload and creates an
-   * app-authenticated Octokit client for enterprise API calls.
+   * Extracts enterprise slug from the webhook payload, finds the enterprise
+   * installation from the app's installation list, and creates an Octokit
+   * client authenticated with the enterprise installation token.
    *
    * @param {object} context - Probot context
    */
@@ -158,9 +159,22 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     if (enterprise && enterprise.slug) {
       context.enterpriseSlug = enterprise.slug
       try {
-        context.appGithub = await robot.auth()
+        // Get a JWT-authenticated client to list all installations
+        const appGithub = await robot.auth()
+        const installations = await appGithub.paginate(
+          appGithub.apps.listInstallations.endpoint.merge({ per_page: 100 })
+        )
+        // Find the installation targeting this enterprise
+        const enterpriseInstallation = installations.find(
+          i => i.target_type === 'Enterprise' && i.account && i.account.slug === enterprise.slug
+        )
+        if (enterpriseInstallation) {
+          context.appGithub = await robot.auth(enterpriseInstallation.id)
+        } else {
+          robot.log.debug(`No enterprise installation found for slug '${enterprise.slug}'. App installation management will not be available.`)
+        }
       } catch (e) {
-        robot.log.debug(`Could not create app-authenticated client for enterprise: ${e.message}`)
+        robot.log.debug(`Could not create enterprise-authenticated client: ${e.message}`)
       }
     }
   }
