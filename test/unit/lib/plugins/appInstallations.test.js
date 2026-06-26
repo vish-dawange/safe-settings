@@ -108,17 +108,10 @@ describe('AppInstallations', () => {
     })
 
     it('processes unselections before selections in non-nop mode', async () => {
-      // repo-a (add) resolves to id 100; repo-b (remove) resolves to id 200
-      github.repos.get.mockImplementation(({ repo }) => {
-        if (repo === 'repo-a') return Promise.resolve({ data: { id: 100 } })
-        if (repo === 'repo-b') return Promise.resolve({ data: { id: 200 } })
-        return Promise.resolve({ data: { id: 0 } })
-      })
-
       const callOrder = []
       appGithub.request.mockImplementation((route) => {
-        if (route.startsWith('DELETE')) callOrder.push('remove')
-        if (route.startsWith('POST')) callOrder.push('add')
+        if (route.includes('/repositories/remove')) callOrder.push('remove')
+        if (route.includes('/repositories/add')) callOrder.push('add')
         return Promise.resolve({ data: {} })
       })
 
@@ -207,6 +200,51 @@ describe('AppInstallations', () => {
       })
 
       expect(result).toEqual([])
+    })
+
+    it("toggles to 'all' when desired is all and current is selected", async () => {
+      const plugin = new AppInstallations(false, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      await plugin.syncFull({
+        copilot: { installation_id: 1, repos: 'all', current_selection: 'selected' }
+      })
+
+      expect(appGithub.request).toHaveBeenCalledWith(
+        expect.stringContaining('/repositories'),
+        expect.objectContaining({ repository_selection: 'all', installation_id: 1 })
+      )
+    })
+
+    it('skips when desired is all and current is already all', async () => {
+      const plugin = new AppInstallations(false, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      const result = await plugin.syncFull({
+        copilot: { installation_id: 1, repos: 'all', current_selection: 'all' }
+      })
+
+      expect(result).toEqual([])
+      expect(appGithub.request).not.toHaveBeenCalled()
+    })
+
+    it("narrows from 'all' to 'selected' when desired is a set", async () => {
+      const plugin = new AppInstallations(false, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      await plugin.syncFull({
+        copilot: { installation_id: 1, repos: new Set(['repo-a']), current_selection: 'all' }
+      })
+
+      expect(appGithub.request).toHaveBeenCalledWith(
+        expect.stringContaining('/repositories'),
+        expect.objectContaining({ repository_selection: 'selected', repositories: ['repo-a'] })
+      )
+    })
+
+    it("leaves 'all' untouched in additive mode", async () => {
+      const plugin = new AppInstallations(false, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      plugin.additive = true
+      const result = await plugin.syncFull({
+        copilot: { installation_id: 1, repos: new Set(['repo-a']), current_selection: 'all' }
+      })
+
+      expect(result).toEqual([])
+      expect(appGithub.request).not.toHaveBeenCalled()
     })
   })
 })

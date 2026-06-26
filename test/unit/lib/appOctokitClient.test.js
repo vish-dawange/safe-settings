@@ -27,17 +27,19 @@ describe('AppOctokitClient', () => {
   })
 
   describe('listOrgInstallations', () => {
-    it('returns installations filtered by org', async () => {
+    it('returns org installations', async () => {
       github.paginate.mockResolvedValue([
-        { id: 1, app_slug: 'app-a', account: { login: 'my-org' } },
-        { id: 2, app_slug: 'app-b', account: { login: 'other-org' } },
-        { id: 3, app_slug: 'app-c', account: { login: 'my-org' } }
+        { id: 1, app_slug: 'app-a', repository_selection: 'all' },
+        { id: 3, app_slug: 'app-c', repository_selection: 'selected' }
       ])
 
       const result = await client.listOrgInstallations('my-org')
       expect(result).toHaveLength(2)
       expect(result[0].app_slug).toBe('app-a')
-      expect(result[1].app_slug).toBe('app-c')
+      expect(github.request.endpoint.merge).toHaveBeenCalledWith(
+        'GET /enterprises/{enterprise}/apps/organizations/{org}/installations',
+        expect.objectContaining({ enterprise: 'my-enterprise', org: 'my-org' })
+      )
     })
 
     it('throws descriptive error on 403', async () => {
@@ -55,41 +57,77 @@ describe('AppOctokitClient', () => {
     })
   })
 
+  describe('setRepositorySelection', () => {
+    it("toggles to 'all' without repositories", async () => {
+      await client.setRepositorySelection('my-org', 123, 'all')
+      expect(github.request).toHaveBeenCalledWith(
+        'PATCH /enterprises/{enterprise}/apps/organizations/{org}/installations/{installation_id}/repositories',
+        expect.objectContaining({
+          org: 'my-org',
+          installation_id: 123,
+          repository_selection: 'all'
+        })
+      )
+      const callArgs = github.request.mock.calls[0][1]
+      expect(callArgs.repositories).toBeUndefined()
+    })
+
+    it("toggles to 'selected' with repository names", async () => {
+      await client.setRepositorySelection('my-org', 123, 'selected', ['repo-a', 'repo-b'])
+      expect(github.request).toHaveBeenCalledWith(
+        'PATCH /enterprises/{enterprise}/apps/organizations/{org}/installations/{installation_id}/repositories',
+        expect.objectContaining({
+          repository_selection: 'selected',
+          repositories: ['repo-a', 'repo-b']
+        })
+      )
+    })
+  })
+
   describe('addReposToInstallation', () => {
     it('does nothing for empty array', async () => {
-      await client.addReposToInstallation(123, [])
+      await client.addReposToInstallation('my-org', 123, [])
       expect(github.request).not.toHaveBeenCalled()
     })
 
-    it('sends single batch for <= 50 repos', async () => {
-      const ids = Array.from({ length: 10 }, (_, i) => i + 1)
-      await client.addReposToInstallation(123, ids)
+    it('sends single batch for <= 50 repos using names', async () => {
+      const names = Array.from({ length: 10 }, (_, i) => `repo-${i}`)
+      await client.addReposToInstallation('my-org', 123, names)
       expect(github.request).toHaveBeenCalledTimes(1)
       expect(github.request).toHaveBeenCalledWith(
-        expect.stringContaining('POST'),
+        'PATCH /enterprises/{enterprise}/apps/organizations/{org}/installations/{installation_id}/repositories/add',
         expect.objectContaining({
-          repository_ids: ids,
-          installation_id: 123
+          repositories: names,
+          installation_id: 123,
+          org: 'my-org'
         })
       )
     })
 
     it('batches into chunks of 50', async () => {
-      const ids = Array.from({ length: 120 }, (_, i) => i + 1)
-      await client.addReposToInstallation(123, ids)
+      const names = Array.from({ length: 120 }, (_, i) => `repo-${i}`)
+      await client.addReposToInstallation('my-org', 123, names)
       expect(github.request).toHaveBeenCalledTimes(3) // 50 + 50 + 20
     })
   })
 
   describe('removeReposFromInstallation', () => {
     it('does nothing for empty array', async () => {
-      await client.removeReposFromInstallation(123, [])
+      await client.removeReposFromInstallation('my-org', 123, [])
       expect(github.request).not.toHaveBeenCalled()
     })
 
+    it('uses the remove endpoint with names', async () => {
+      await client.removeReposFromInstallation('my-org', 123, ['repo-a'])
+      expect(github.request).toHaveBeenCalledWith(
+        'PATCH /enterprises/{enterprise}/apps/organizations/{org}/installations/{installation_id}/repositories/remove',
+        expect.objectContaining({ repositories: ['repo-a'] })
+      )
+    })
+
     it('batches into chunks of 50', async () => {
-      const ids = Array.from({ length: 75 }, (_, i) => i + 1)
-      await client.removeReposFromInstallation(123, ids)
+      const names = Array.from({ length: 75 }, (_, i) => `repo-${i}`)
+      await client.removeReposFromInstallation('my-org', 123, names)
       expect(github.request).toHaveBeenCalledTimes(2) // 50 + 25
     })
   })
