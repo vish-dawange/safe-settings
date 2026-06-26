@@ -234,8 +234,32 @@
         }
       }
     },
+    "app_installations": {
+      "description": "Manage which repositories a GitHub App installation can access. The target is a GitHub App installation rather than a repository. Repo selection follows the config hierarchy: org-level settings.yml selects all repos (repository_selection: all); suborgs/*.yml selects repos by the suborg's targeting criteria; repos/*.yml adds the specific repo. Requires safe-settings to be installed on the enterprise with 'Enterprise organization installations' permission.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "app_slug"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "app_slug": {
+            "type": "string",
+            "description": "The slug of the GitHub App installation to manage."
+          },
+          "repository_selection": {
+            "type": "string",
+            "enum": [
+              "all"
+            ],
+            "description": "Only valid at the org level (settings.yml). 'all' selects every repository in the org and takes precedence over any suborg/repo-level selections."
+          }
+        }
+      }
+    },
     "additive_plugins": {
-      "description": "List of Diffable plugins to run in additive mode. In additive mode the plugin will only add and update entries; it will never call remove(), so items that exist on GitHub but are absent from the YAML are preserved. Only Diffable-extending plugins are supported (labels, collaborators, teams, milestones, autolinks, environments, custom_properties, variables, rulesets, custom_repository_roles). Declare only in settings.yml (org level) to keep behavior consistent across all repos.",
+      "description": "List of Diffable plugins to run in additive mode. In additive mode the plugin will only add and update entries; it will never call remove(), so items that exist on GitHub but are absent from the YAML are preserved. Only Diffable-extending plugins are supported (labels, collaborators, teams, milestones, autolinks, environments, custom_properties, variables, rulesets, custom_repository_roles). The app_installations plugin also honors additive mode (only adds repos to installations, never removes). Declare only in settings.yml (org level) to keep behavior consistent across all repos.",
       "type": "array",
       "items": {
         "type": "string",
@@ -249,7 +273,8 @@
           "custom_properties",
           "variables",
           "rulesets",
-          "custom_repository_roles"
+          "custom_repository_roles",
+          "app_installations"
         ]
       }
     },
@@ -274,7 +299,8 @@
               "custom_properties",
               "custom_repository_roles",
               "variables",
-              "archive"
+              "archive",
+              "app_installations"
             ]
           },
           {
@@ -300,7 +326,8 @@
                   "custom_properties",
                   "custom_repository_roles",
                   "variables",
-                  "archive"
+                  "archive",
+                  "app_installations"
                 ]
               },
               "target": {
