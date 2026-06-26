@@ -1615,4 +1615,106 @@ repository:
       expect(result).toEqual({ repos: [], previousPluginSections: [] })
     })
   })
+
+  describe('_buildAppChangesFromDelta', () => {
+    let settings
+    const AppOctokitClient = require('../../../lib/appOctokitClient')
+    const RepoSelector = require('../../../lib/repoSelector')
+
+    beforeEach(() => {
+      stubConfig = { restrictedRepos: {} }
+      settings = createSettings(stubConfig)
+      // Map app slug -> installation id
+      jest.spyOn(AppOctokitClient.prototype, 'listOrgInstallations').mockResolvedValue([
+        { app_slug: 'my-app', id: 42 }
+      ])
+    })
+
+    afterEach(() => {
+      jest.restoreAllMocks()
+    })
+
+    it('skips an app when suborg targeting and app_installations are unchanged', async () => {
+      // Same targeting resolves to the same repos in both versions
+      jest.spyOn(RepoSelector.prototype, 'resolve').mockResolvedValue(new Set(['repo-a', 'repo-b']))
+
+      // Current suborg config: app present
+      settings.subOrgConfigs = {
+        frontend: {
+          suborgrepos: ['repo-a', 'repo-b'],
+          app_installations: [{ app_slug: 'my-app' }]
+        }
+      }
+      // Previous version (baseRef): identical app_installations
+      settings.loadYamlFromRef = jest.fn().mockResolvedValue({
+        suborgrepos: ['repo-a', 'repo-b'],
+        app_installations: [{ app_slug: 'my-app' }]
+      })
+
+      const result = await settings._buildAppChangesFromDelta(
+        settings.github,
+        'my-enterprise',
+        [{ repo: 'frontend', path: '.github/suborgs/frontend.yml' }],
+        [],
+        'prev-sha'
+      )
+
+      // No churn: nothing to add or remove
+      expect(result).toEqual([])
+    })
+
+    it('emits only the targeting diff when suborg repos change', async () => {
+      // previous: repo-a, repo-b ; current: repo-b, repo-c
+      jest.spyOn(RepoSelector.prototype, 'resolve')
+        .mockResolvedValueOnce(new Set(['repo-b', 'repo-c'])) // current
+        .mockResolvedValueOnce(new Set(['repo-a', 'repo-b'])) // previous
+
+      settings.subOrgConfigs = {
+        frontend: {
+          suborgrepos: ['repo-b', 'repo-c'],
+          app_installations: [{ app_slug: 'my-app' }]
+        }
+      }
+      settings.loadYamlFromRef = jest.fn().mockResolvedValue({
+        suborgrepos: ['repo-a', 'repo-b'],
+        app_installations: [{ app_slug: 'my-app' }]
+      })
+
+      const result = await settings._buildAppChangesFromDelta(
+        settings.github,
+        'my-enterprise',
+        [{ repo: 'frontend', path: '.github/suborgs/frontend.yml' }],
+        [],
+        'prev-sha'
+      )
+
+      expect(result).toHaveLength(1)
+      expect(result[0].app_slug).toBe('my-app')
+      expect(result[0].repository_selection.sort()).toEqual(['repo-c'])
+      expect(result[0].repository_unselection.sort()).toEqual(['repo-a'])
+    })
+
+    it('skips apps configured as repository_selection: all at org level', async () => {
+      jest.spyOn(RepoSelector.prototype, 'resolve').mockResolvedValue(new Set(['repo-a']))
+
+      settings.config = {
+        ...settings.config,
+        app_installations: [{ app_slug: 'my-app', repository_selection: 'all' }]
+      }
+      settings.subOrgConfigs = {
+        frontend: { suborgrepos: ['repo-a'], app_installations: [{ app_slug: 'my-app' }] }
+      }
+      settings.loadYamlFromRef = jest.fn().mockResolvedValue({})
+
+      const result = await settings._buildAppChangesFromDelta(
+        settings.github,
+        'my-enterprise',
+        [{ repo: 'frontend', path: '.github/suborgs/frontend.yml' }],
+        [],
+        'prev-sha'
+      )
+
+      expect(result).toEqual([])
+    })
+  })
 }) // Settings Tests
