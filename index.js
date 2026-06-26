@@ -92,6 +92,9 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       const config = Object.assign({}, deploymentConfig, runtimeConfig)
       robot.log.debug(`config for ref ${ref} is ${JSON.stringify(config)}`)
 
+      // Enrich context with enterprise info for app installation management
+      await enrichContextWithEnterprise(context)
+
       // Load base branch config for NOP filtering (only show PR-introduced changes)
       let baseConfig = null
       if (nop && baseRef) {
