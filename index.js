@@ -531,31 +531,15 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
   })
 
   // ────────────────────────────────────────────────────────────────────────
-  // App installation drift detection handlers
+  // App installation target handler
+  //
+  // Note: We intentionally do NOT handle `installation.repositories_added` /
+  // `installation.repositories_removed`. A GitHub App only receives those
+  // events for its OWN installation, not for the managed apps (e.g. Copilot,
+  // Dependabot) whose repository access safe-settings controls. They cannot
+  // detect drift on managed apps, so drift is reconciled by the scheduled
+  // (cron) full sync instead.
   // ────────────────────────────────────────────────────────────────────────
-
-  const installation_change_events = [
-    'installation.repositories_added',
-    'installation.repositories_removed'
-  ]
-
-  robot.on(installation_change_events, async context => {
-    const { payload } = context
-    const { sender } = payload
-    robot.log.debug('App installation repos changed by ', JSON.stringify(sender))
-    if (sender.type === 'Bot') {
-      robot.log.debug('App installation repos changed by Bot')
-      return
-    }
-    robot.log.debug('App installation repos changed by a Human — triggering sync to revert drift')
-
-    // Build a context that targets the admin repo for this org
-    const orgLogin = payload.installation.account.login
-    const updatedContext = Object.assign({}, context, {
-      repo: () => { return { repo: env.ADMIN_REPO, owner: orgLogin } }
-    })
-    return syncAllSettings(false, updatedContext)
-  })
 
   robot.on('installation_target', async context => {
     const { payload } = context

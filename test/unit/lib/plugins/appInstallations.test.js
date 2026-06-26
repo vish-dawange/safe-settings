@@ -107,26 +107,32 @@ describe('AppInstallations', () => {
       expect(result[0].action.deletions).toBeNull()
     })
 
-    it('adds repos via enterprise client in non-nop mode', async () => {
-      github.repos.get
-        .mockResolvedValueOnce({ data: { id: 100 } })
-        .mockResolvedValueOnce({ data: { id: 200 } })
+    it('processes unselections before selections in non-nop mode', async () => {
+      // repo-a (add) resolves to id 100; repo-b (remove) resolves to id 200
+      github.repos.get.mockImplementation(({ repo }) => {
+        if (repo === 'repo-a') return Promise.resolve({ data: { id: 100 } })
+        if (repo === 'repo-b') return Promise.resolve({ data: { id: 200 } })
+        return Promise.resolve({ data: { id: 0 } })
+      })
+
+      const callOrder = []
+      appGithub.request.mockImplementation((route) => {
+        if (route.startsWith('DELETE')) callOrder.push('remove')
+        if (route.startsWith('POST')) callOrder.push('add')
+        return Promise.resolve({ data: {} })
+      })
 
       const plugin = new AppInstallations(false, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
       await plugin.syncDelta([{
         app_slug: 'copilot',
         installation_id: 1,
-        repository_selection: new Set(['repo-a', 'repo-b']),
-        repository_unselection: new Set()
+        repository_selection: new Set(['repo-a']),
+        repository_unselection: new Set(['repo-b'])
       }])
 
-      // Should have called request to add repos
-      expect(appGithub.request).toHaveBeenCalledWith(
-        expect.stringContaining('POST'),
-        expect.objectContaining({
-          repository_ids: [100, 200]
-        })
-      )
+      // Removal must be applied before addition so a repo removed by one
+      // config and added by another ends up present.
+      expect(callOrder).toEqual(['remove', 'add'])
     })
   })
 
