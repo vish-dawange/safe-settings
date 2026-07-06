@@ -151,6 +151,44 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     }
   }
   /**
+   * Finds the enterprise installation for a given slug and returns an Octokit
+   * client authenticated with the enterprise installation token, along with
+   * the installation ID.
+   *
+   * Uses the cached enterprise installation ID when available to avoid
+   * re-listing installations. Returns null if no matching enterprise
+   * installation is found.
+   *
+   * @param {string} enterpriseSlug - Enterprise slug
+   * @returns {Promise<{ appGithub: object, installationId: number } | null>}
+   */
+  async function getEnterpriseAppClient (enterpriseSlug) {
+    if (!enterpriseSlug) return null
+
+    // Use cached enterprise installation ID if available
+    if (cachedEnterpriseInstallationId) {
+      const appGithub = await robot.auth(cachedEnterpriseInstallationId)
+      return { appGithub, installationId: cachedEnterpriseInstallationId }
+    }
+
+    // Get a JWT-authenticated client to list all installations
+    const appGithub = await robot.auth()
+    const installations = await appGithub.paginate(
+      appGithub.apps.listInstallations.endpoint.merge({ per_page: 100 })
+    )
+    // Find the installation targeting this enterprise
+    const enterpriseInstallation = installations.find(
+      i => i.target_type === 'Enterprise' && i.account && i.account.slug === enterpriseSlug
+    )
+    if (!enterpriseInstallation) {
+      return null
+    }
+    cachedEnterpriseInstallationId = enterpriseInstallation.id
+    const enterpriseGithub = await robot.auth(enterpriseInstallation.id)
+    return { appGithub: enterpriseGithub, installationId: enterpriseInstallation.id }
+  }
+
+  /**
    * Enriches the context with enterprise info for app installation management.
    * Extracts enterprise slug from the webhook payload, finds the enterprise
    * installation from the app's installation list, and creates an Octokit
@@ -164,24 +202,9 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     if (enterprise && enterprise.slug) {
       context.enterpriseSlug = enterprise.slug
       try {
-        // Use cached enterprise installation ID if available
-        if (cachedEnterpriseInstallationId) {
-          context.appGithub = await robot.auth(cachedEnterpriseInstallationId)
-          return
-        }
-
-        // Get a JWT-authenticated client to list all installations
-        const appGithub = await robot.auth()
-        const installations = await appGithub.paginate(
-          appGithub.apps.listInstallations.endpoint.merge({ per_page: 100 })
-        )
-        // Find the installation targeting this enterprise
-        const enterpriseInstallation = installations.find(
-          i => i.target_type === 'Enterprise' && i.account && i.account.slug === enterprise.slug
-        )
-        if (enterpriseInstallation) {
-          cachedEnterpriseInstallationId = enterpriseInstallation.id
-          context.appGithub = await robot.auth(cachedEnterpriseInstallationId)
+        const result = await getEnterpriseAppClient(enterprise.slug)
+        if (result) {
+          context.appGithub = result.appGithub
         } else {
           robot.log.debug(`No enterprise installation found for slug '${enterprise.slug}'. App installation management will not be available.`)
         }
@@ -290,7 +313,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       robot.log.debug(`Validated the app is configured properly = \n${JSON.stringify(app.data, null, 2)}`)
     }
 
-    await verifyAppInstallationsPlugin(installations)
+    await verifyAppInstallationsPlugin()
   }
 
   /**
@@ -304,10 +327,8 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
    *      Enterprise organization installations API.
    *
    * If `GH_ENTERPRISE` is not set, this verification is skipped entirely.
-   *
-   * @param {Array} installations - The app's installations (JWT-listed)
    */
-  async function verifyAppInstallationsPlugin (installations) {
+  async function verifyAppInstallationsPlugin () {
     const enterpriseSlug = process.env.GH_ENTERPRISE
     if (!enterpriseSlug) {
       robot.log.debug('GH_ENTERPRISE is not set — skipping app-installations plugin verification')
@@ -320,27 +341,22 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       return
     }
 
-    // Find the installation targeting this enterprise
-    const enterpriseInstallation = (installations || []).find(
-      i => i.target_type === 'Enterprise' && i.account && i.account.slug === enterpriseSlug
-    )
-    if (!enterpriseInstallation) {
-      robot.log.warn(`No enterprise installation found for slug '${enterpriseSlug}'. App-installations plugin will not be able to manage app access. Ensure safe-settings is installed on the enterprise.`)
-      return
-    }
-
     try {
-      // Mint an installation token for the enterprise installation
-      const enterpriseGithub = await robot.auth(enterpriseInstallation.id)
+      const result = await getEnterpriseAppClient(enterpriseSlug)
+      if (!result) {
+        robot.log.warn(`No enterprise installation found for slug '${enterpriseSlug}'. App-installations plugin will not be able to manage app access. Ensure safe-settings is installed on the enterprise.`)
+        return
+      }
+
       const client = new AppOctokitClient({
-        github: enterpriseGithub,
+        github: result.appGithub,
         enterpriseSlug,
         log: robot.log
       })
 
       // Confirm the token can list org app installations (validates permission)
       const orgInstallations = await client.listOrgInstallations(org)
-      robot.log.info(`App-installations plugin verified: enterprise '${enterpriseSlug}' installation (id: ${enterpriseInstallation.id}) can manage apps in org '${org}' (${orgInstallations.length} installation(s) visible)`)
+      robot.log.info(`App-installations plugin verified: enterprise '${enterpriseSlug}' installation (id: ${result.installationId}) can manage apps in org '${org}' (${orgInstallations.length} installation(s) visible)`)
     } catch (e) {
       robot.log.error(`App-installations plugin verification failed for enterprise '${enterpriseSlug}' / org '${org}': ${e.message}`)
     }
