@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-07-06
+- Last updated: 2026-07-06 — added reporting subject model, per-repo pipeline
+  exclusion, startup verification, non-managed-app safety guarantee, and smoke
+  tests.
 - Deciders: safe-settings maintainers
 - Related PR: `decyjphr-app-installation-plugin`
 
@@ -67,8 +70,9 @@ app_installations:
 | `lib/plugins/appInstallations.js` | Reconcile desired vs. live repo access per app (`syncDelta` / `syncFull`). Not `Diffable` — app installations are an org-scoped target, not a per-repo list. |
 | `lib/appOctokitClient.js` | Enterprise-level App client for the Enterprise Organization Installations API. |
 | `lib/repoSelector.js` | Resolve a repo set from **fixed** criteria: name, team, custom properties, or "all". |
-| `lib/settings.js` | `syncAppInstallations` phase; delta computation from changed configs; full desired-state computation. |
-| `index.js` | Enterprise-client enrichment on the context; `installation_target` webhook handler. |
+| `lib/settings.js` | `syncAppInstallations` phase; delta computation from changed configs; full desired-state computation; app-aware NOP reporting. |
+| `lib/nopcommand.js` | Carries an optional `subject` / `subjectType` so reporting can render the **app** (not the org placeholder repo) as the subject of a change. |
+| `index.js` | Enterprise-client enrichment on the context (`getEnterpriseAppClient`); `installation_target` webhook handler; startup `verifyAppInstallationsPlugin` diagnostic. |
 
 ### Sync model: delta vs. full
 
@@ -100,6 +104,27 @@ API (version `2026-03-10`) and operate on repository **names**:
 - Remove: `PATCH …/installations/{id}/repositories/remove`
 
 Add/remove are capped at **50 repos per call** and are auto-batched.
+
+### Reporting (NOP / PR check-run)
+
+The rest of safe-settings reports changes **per repository**. App installation
+changes have no meaningful repository subject — the NopCommands are emitted
+against the `<org> (org)` placeholder repo, which rendered confusingly (e.g. a
+`**admin**` heading with a nested `value: (all repositories)` row).
+
+To fix this without a disruptive rename of the repo-centric reporting pipeline,
+`NopCommand` gained an **optional, additive `subject` / `subjectType`**:
+
+- `subject` defaults to the repo, so every existing plugin is unaffected.
+- `app_installations` sets `subject = <app_slug>`, `subjectType = 'app'`.
+- Reporting groups changes by `subject` (identical to the repo for all other
+  plugins), so each **app** becomes its own heading.
+- For `app_installations`, the impact summary pluralizes **apps** (not repos),
+  rows render as a flat `+`/`-` list of repositories, and the section is
+  excluded from the "repos affected" count (app subjects must not inflate it).
+- The `NopCommand` constructor accepts the `subject` object in the `type`
+  position (defaulting `type` to `INFO`) so callers can pass a subject without
+  restating the default type.
 
 ## Decisions and rationale
 
@@ -150,6 +175,35 @@ Add/remove are capped at **50 repos per call** and are auto-batched.
     is *not* a repository, paving the way for future targets (e.g., Copilot
     policies) to reuse the same phase/plumbing without being repo-bound.
 
+11. **`app_installations` is excluded from the per-repo plugin pipeline.**
+    Although it is registered in `Settings.PLUGINS` (so `disable_plugins` /
+    `additive_plugins` name-validation and suborg-cleanup detection recognize
+    it), `childPluginsList` explicitly skips it. The per-repo pipeline calls
+    `instance.sync()`, which `AppInstallations` does not implement (it exposes
+    `syncDelta` / `syncFull` and has a different constructor signature). It is
+    reconciled **only** through the dedicated `syncAppInstallations` phase.
+
+12. **App is the reporting subject.** See *Reporting* above — an additive
+    `NopCommand.subject` avoids a global rename of the repo-centric pipeline
+    while presenting app installation changes with the app as the subject and
+    keeping repo counts accurate.
+
+13. **Startup verification.** On boot, `index.js` runs
+    `verifyAppInstallationsPlugin`: when `GH_ENTERPRISE` is set it mints an
+    enterprise installation token and confirms it can list app installations in
+    the target org (`GH_ORG`), logging a clear success/failure. When
+    `GH_ENTERPRISE` is unset the check is skipped, so non-enterprise
+    deployments are unaffected. This surfaces a mis-scoped enterprise install
+    early rather than at first sync.
+
+14. **Only explicitly-named apps are ever touched.** Both full and delta sync
+    operate solely on apps that appear in an `app_installations` entry in some
+    config layer. `listOrgInstallations` is used only to resolve
+    `app_slug → installation_id`; it never seeds the desired state, and there is
+    no "remove apps not in config" sweep. Consequently the safe-settings app's
+    own installation (and every other unlisted app) is left untouched on every
+    sync unless a config explicitly names it.
+
 ## Consequences
 
 ### Positive
@@ -159,6 +213,15 @@ Add/remove are capped at **50 repos per call** and are auto-batched.
 - Names-based API + native "all" toggle removes an entire class of ID-resolution
   and enumeration work.
 - Batching respects the 50-repo API limit transparently.
+- App installation changes read clearly in PR comments (app as subject) without
+  reworking the repo-centric reporting pipeline or distorting repo counts.
+- Unlisted apps — including safe-settings itself — are provably never modified,
+  so enabling the plugin cannot accidentally lock the app out of repositories.
+- A startup self-check catches missing/mis-scoped enterprise permissions before
+  the first sync.
+- Smoke coverage (`smoke-test.js` Phase 17) exercises org-level `all`,
+  repo-level selection, add/remove, drift remediation via full sync, and
+  sub-org (delta) targeting, restoring each app's original state on teardown.
 
 ### Negative / limitations
 
