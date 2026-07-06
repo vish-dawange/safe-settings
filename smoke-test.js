@@ -84,6 +84,24 @@ const WEBHOOK_SETTLE_MS = 15000
 // Fine-grained PAT for drift tests (must appear as a human, not Bot)
 const GH_TOKEN = process.env.GH_TOKEN || ''
 
+// ─── App installation plugin config (Phase 17) ───────────────────────────────
+// Enterprise slug — required for the app_installations plugin, which manages
+// GitHub App installation repository access via the Enterprise organization
+// installations API. Read from GH_ENTERPRISE (same var safe-settings uses).
+const GH_ENTERPRISE = process.env.GH_ENTERPRISE || ''
+// One or more enterprise-level GitHub App slugs to exercise the plugin.
+// ONE app is sufficient for full lifecycle coverage; providing a second app
+// (comma-separated) additionally verifies that changes to one app's
+// installation do not affect another's. Pre-create these as enterprise GitHub
+// Apps and install them on the org (creation requires a human).
+//   SMOKE_APP_SLUGS=app-one,app-two   (or singular SMOKE_APP_SLUG=app-one)
+const APP_SLUGS = (process.env.SMOKE_APP_SLUGS || process.env.SMOKE_APP_SLUG || '')
+  .split(',').map(s => s.trim()).filter(Boolean)
+// Dedicated repos created/managed by the app_installations phase.
+const APP_TEST_REPOS = ['smoke-app-repo-1', 'smoke-app-repo-2', 'smoke-app-repo-3']
+// Enterprise org installations API version (matches lib/appOctokitClient.js).
+const APPS_API_VERSION = '2026-03-10'
+
 // Interactive mode: pause after each phase for manual validation
 // Accepts --interactive flag or bare positional "interactive" word.
 const INTERACTIVE = process.argv.includes('--interactive') || process.argv.slice(2).includes('interactive')
@@ -127,6 +145,12 @@ class InteractiveExit extends Error {
 // ─── Octokit client (initialized in main) ────────────────────────────────────
 
 let octokit = null
+// Enterprise-installation-authenticated client (Phase 17). Null when the app
+// is not installed on the enterprise or GH_ENTERPRISE is unset.
+let entOctokit = null
+// Snapshot of each managed app's installation state, captured at the start of
+// Phase 17 and restored during teardown so shared apps are left untouched.
+const appInstallSnapshot = {}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -397,6 +421,66 @@ async function waitForCheckRun (owner, repo, sha, { timeout = MAX_POLL_MS } = {}
     const cr = data.check_runs.find(c => c.name === 'Safe-setting validator')
     return (cr && cr.status === 'completed') ? cr : null
   }, { timeout, desc: 'check run to complete' })
+}
+
+// Ensure a repository exists in the org (create it directly if missing).
+async function ensureRepo (name) {
+  try {
+    await octokit.rest.repos.get({ owner: ORG, repo: name })
+    return
+  } catch { /* needs creation */ }
+  try {
+    await octokit.rest.repos.createInOrg({ org: ORG, name, private: true, auto_init: true })
+    await poll(async () => {
+      try { await octokit.rest.repos.get({ owner: ORG, repo: name }); return true } catch { return null }
+    }, { desc: `repo ${name} to be created`, timeout: 30000 })
+  } catch (e) { log(`  Could not create repo ${name}: ${e.message}`) }
+}
+
+// ─── Enterprise organization installations API helpers (Phase 17) ────────────
+
+async function listOrgAppInstallations () {
+  const options = entOctokit.request.endpoint.merge(
+    'GET /enterprises/{enterprise}/apps/organizations/{org}/installations',
+    { enterprise: GH_ENTERPRISE, org: ORG, headers: { 'X-GitHub-Api-Version': APPS_API_VERSION } }
+  )
+  return entOctokit.paginate(options)
+}
+
+async function getAppInstallation (appSlug) {
+  const installations = await listOrgAppInstallations()
+  return installations.find(i => i.app_slug === appSlug) || null
+}
+
+async function listInstallationRepoNames (installationId) {
+  const options = entOctokit.request.endpoint.merge(
+    'GET /enterprises/{enterprise}/apps/organizations/{org}/installations/{installation_id}/repositories',
+    { enterprise: GH_ENTERPRISE, org: ORG, installation_id: installationId, headers: { 'X-GitHub-Api-Version': APPS_API_VERSION } }
+  )
+  const repos = await entOctokit.paginate(options)
+  return repos.map(r => r.name)
+}
+
+async function setInstallationSelection (installationId, selection, repositories) {
+  const params = {
+    enterprise: GH_ENTERPRISE,
+    org: ORG,
+    installation_id: installationId,
+    repository_selection: selection,
+    headers: { 'X-GitHub-Api-Version': APPS_API_VERSION }
+  }
+  if (selection === 'selected') params.repositories = repositories || []
+  await entOctokit.request('PATCH /enterprises/{enterprise}/apps/organizations/{org}/installations/{installation_id}/repositories', params)
+}
+
+async function addInstallationRepos (installationId, repositoryNames) {
+  await entOctokit.request('PATCH /enterprises/{enterprise}/apps/organizations/{org}/installations/{installation_id}/repositories/add', {
+    enterprise: GH_ENTERPRISE,
+    org: ORG,
+    installation_id: installationId,
+    repositories: repositoryNames,
+    headers: { 'X-GitHub-Api-Version': APPS_API_VERSION }
+  })
 }
 
 // ─── Safe-settings process management ────────────────────────────────────────
@@ -2366,6 +2450,24 @@ async function teardown () {
   try { await octokit.rest.repos.update({ owner: ORG, repo: 'demo-repo-service1', archived: false }) } catch { /* ok */ }
   for (const repo of TEST_REPOS) { await deleteRepo(ORG, repo) }
 
+  // Restore app installations to their original state so shared enterprise
+  // apps are left untouched by the smoke test.
+  if (entOctokit && Object.keys(appInstallSnapshot).length > 0) {
+    log('Restoring app installation repository selections...')
+    for (const [slug, snap] of Object.entries(appInstallSnapshot)) {
+      try {
+        if (snap.selection === 'all') {
+          await setInstallationSelection(snap.installationId, 'all')
+        } else if (snap.selection === 'selected' && snap.repos.length > 0) {
+          await setInstallationSelection(snap.installationId, 'selected', snap.repos)
+        }
+      } catch (e) { log(`  Could not restore app '${slug}' installation: ${e.message}`) }
+    }
+  }
+
+  log('Deleting app-install smoke repos...')
+  for (const repo of APP_TEST_REPOS) { await deleteRepo(ORG, repo) }
+
   log('Deleting test teams...')
   for (const team of TEST_TEAMS) { await deleteTeam(ORG, team.toLowerCase()) }
   try { await deleteTeam(ORG, SMOKE_NR_TEAM) } catch { /* ok */ }
@@ -2701,6 +2803,297 @@ async function phase16RulesetNameResolution () {
   }
 }
 
+// ─── App installation config builders (Phase 17) ─────────────────────────────
+
+// Org-level settings.yml giving an app access to ALL repos.
+const settingsAppInstallAll = (slug) => `# App installations: org-level repository_selection all
+app_installations:
+  - app_slug: ${slug}
+    repository_selection: all
+`
+
+// Empty org settings (no app_installations) with an optional comment bump to
+// force a full sync while app selection is driven entirely by repo configs.
+const settingsAppInstallEmpty = (bump = '') => `# App installations: no org-level app config${bump ? ` (${bump})` : ''}
+`
+
+// Repo-level config that force-creates the repo and adds it to the app.
+const repoAppInstallConfig = (name, slug) => `repository:
+  name: ${name}
+app_installations:
+  - app_slug: ${slug}
+`
+
+// Suborg-level config that targets an explicit list of repos (suborgrepos) and
+// adds the app for those repos. Suborg config changes drive the delta sync.
+const suborgAppInstallConfig = (repos, slug) => `suborgrepos:
+${repos.map(r => `  - ${r}`).join('\n')}
+app_installations:
+  - app_slug: ${slug}
+`
+
+async function phase17AppInstallations () {
+  logPhase('Phase 17: App installation management (app_installations plugin)')
+
+  if (!GH_ENTERPRISE) {
+    log('17: GH_ENTERPRISE not set — skipping app_installations tests')
+    return
+  }
+  if (APP_SLUGS.length === 0) {
+    log('17: SMOKE_APP_SLUGS not set — skipping app_installations tests')
+    return
+  }
+  if (!entOctokit) {
+    logFail('17: enterprise installation not available (app not installed on enterprise or GH_ENTERPRISE mismatch) — cannot run app_installations tests')
+    return
+  }
+
+  const defaultBranch = await getDefaultBranch()
+  const app = APP_SLUGS[0]
+
+  // Snapshot every managed app's live installation state for restore in teardown.
+  for (const slug of APP_SLUGS) {
+    const inst = await getAppInstallation(slug)
+    if (!inst) {
+      logFail(`17: app '${slug}' is not installed on org ${ORG} via enterprise '${GH_ENTERPRISE}' — pre-create and install it`)
+      continue
+    }
+    appInstallSnapshot[slug] = {
+      installationId: inst.id,
+      selection: inst.repository_selection,
+      repos: inst.repository_selection === 'selected' ? await listInstallationRepoNames(inst.id) : []
+    }
+  }
+
+  const primary = appInstallSnapshot[app]
+  if (!primary) {
+    logFail(`17: primary app '${app}' installation not found — aborting app_installations tests`)
+    return
+  }
+  const installationId = primary.installationId
+  log(`17: primary app '${app}' installation id=${installationId}, initial selection='${primary.selection}'`)
+
+  log('17: Ensuring dedicated app-install smoke repos exist...')
+  await ensureRepo(APP_TEST_REPOS[0])
+  await ensureRepo(APP_TEST_REPOS[1])
+
+  // ── 17a: Org-level repository_selection: all ───────────────────────────────
+  {
+    log('17a: Setting app to repository_selection: all via org settings.yml')
+    const branch = 'smoke-test-phase17a'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, settingsAppInstallAll(app), branch, '17a: app_installations repository_selection all')
+    const pr = await createPR(ORG, ADMIN_REPO, '17a: app_installations org-level all', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '17a: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `17a: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const selAll = await poll(async () => {
+      const i = await getAppInstallation(app)
+      return (i && i.repository_selection === 'all') ? i : null
+    }, { desc: "app installation to be set to 'all'", timeout: 90000 })
+    assert(selAll !== null, "17a: app repository_selection set to 'all' by org-level config")
+
+    // Isolation: any other configured app must be unchanged by app[0]'s config.
+    for (const slug of APP_SLUGS.slice(1)) {
+      const snap = appInstallSnapshot[slug]
+      if (!snap) continue
+      const other = await getAppInstallation(slug)
+      assert(other !== null && other.repository_selection === snap.selection,
+        `17a: other app '${slug}' repository_selection unchanged (isolation)`)
+    }
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 17b: Repo-level selection for two repos (full sync via settings.yml) ────
+  // Remove the org-level 'all' and drive selection entirely from repo configs.
+  // A settings.yml change triggers a full sync, which recomputes desired state
+  // from all layers and narrows the installation from 'all' → 'selected'.
+  {
+    log('17b: Narrowing app to two specific repos via repo-level configs')
+    const branch = 'smoke-test-phase17b'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, settingsAppInstallEmpty(), branch, '17b: clear org app_installations')
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/${APP_TEST_REPOS[0]}.yml`, repoAppInstallConfig(APP_TEST_REPOS[0], app), branch, `17b: add ${APP_TEST_REPOS[0]} to app`)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/${APP_TEST_REPOS[1]}.yml`, repoAppInstallConfig(APP_TEST_REPOS[1], app), branch, `17b: add ${APP_TEST_REPOS[1]} to app`)
+    const pr = await createPR(ORG, ADMIN_REPO, '17b: app_installations repo-level selection', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '17b: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `17b: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const selected = await poll(async () => {
+      const i = await getAppInstallation(app)
+      if (!i || i.repository_selection !== 'selected') return null
+      const repos = await listInstallationRepoNames(i.id)
+      return (repos.includes(APP_TEST_REPOS[0]) && repos.includes(APP_TEST_REPOS[1])) ? repos : null
+    }, { desc: "app installation to be 'selected' with the two repos", timeout: 90000 })
+    assert(selected !== null, `17b: app narrowed to 'selected' with ${APP_TEST_REPOS[0]} and ${APP_TEST_REPOS[1]}`)
+  }
+
+  // ── 17c: Add a third repo via a new repo config ────────────────────────────
+  {
+    log('17c: Adding a third repo to the app via a new repo config')
+    await ensureRepo(APP_TEST_REPOS[2])
+    const branch = 'smoke-test-phase17c'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    // Bump settings.yml to force a full sync that includes the new repo config.
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, settingsAppInstallEmpty('bump 17c'), branch, '17c: bump settings to trigger full sync')
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/${APP_TEST_REPOS[2]}.yml`, repoAppInstallConfig(APP_TEST_REPOS[2], app), branch, `17c: add ${APP_TEST_REPOS[2]} to app`)
+    const pr = await createPR(ORG, ADMIN_REPO, '17c: app_installations add repo', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '17c: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `17c: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const added = await poll(async () => {
+      const i = await getAppInstallation(app)
+      if (!i || i.repository_selection !== 'selected') return null
+      const repos = await listInstallationRepoNames(i.id)
+      return repos.includes(APP_TEST_REPOS[2]) ? repos : null
+    }, { desc: `${APP_TEST_REPOS[2]} to be added to the app installation`, timeout: 90000 })
+    assert(added !== null, `17c: ${APP_TEST_REPOS[2]} added to app installation`)
+  }
+
+  // ── 17d: Remove the third repo by deleting its config ──────────────────────
+  {
+    log('17d: Removing the third repo from the app by deleting its repo config')
+    const branch = 'smoke-test-phase17d'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await deleteFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/${APP_TEST_REPOS[2]}.yml`, branch, `17d: remove ${APP_TEST_REPOS[2]} config`)
+    // Bump settings.yml to force a full sync (removals are reconciled by full sync).
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, settingsAppInstallEmpty('bump 17d'), branch, '17d: bump settings to trigger full sync')
+    const pr = await createPR(ORG, ADMIN_REPO, '17d: app_installations remove repo', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '17d: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `17d: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const removed = await poll(async () => {
+      const i = await getAppInstallation(app)
+      if (!i || i.repository_selection !== 'selected') return null
+      const repos = await listInstallationRepoNames(i.id)
+      return !repos.includes(APP_TEST_REPOS[2]) ? repos : null
+    }, { desc: `${APP_TEST_REPOS[2]} to be removed from the app installation`, timeout: 90000 })
+    assert(removed !== null, `17d: ${APP_TEST_REPOS[2]} removed from app installation`)
+  }
+
+  // ── 17e: Drift remediation via full sync ───────────────────────────────────
+  // Manually add an unmanaged repo to the installation, then trigger a full
+  // sync (settings.yml bump). Full sync must remove the drifted repo since it
+  // is not in any config layer's desired state.
+  {
+    log(`17e: Injecting drift — adding unmanaged ${APP_TEST_REPOS[2]} to the installation directly`)
+    try {
+      await addInstallationRepos(installationId, [APP_TEST_REPOS[2]])
+    } catch (e) { logFail(`17e: could not inject drift: ${e.message}`) }
+
+    const driftPresent = await poll(async () => {
+      const repos = await listInstallationRepoNames(installationId)
+      return repos.includes(APP_TEST_REPOS[2]) ? repos : null
+    }, { desc: `drifted ${APP_TEST_REPOS[2]} to be present before remediation`, timeout: 30000 })
+    assert(driftPresent !== null, `17e: drift injected (${APP_TEST_REPOS[2]} present on installation)`)
+
+    const branch = 'smoke-test-phase17e'
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+    await createBranch(ORG, ADMIN_REPO, branch)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/settings.yml`, settingsAppInstallEmpty('bump 17e'), branch, '17e: bump settings to trigger full sync drift remediation')
+    const pr = await createPR(ORG, ADMIN_REPO, '17e: app_installations drift remediation', branch, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+    assert(checkRun !== null, '17e: NOP check run completed')
+    if (checkRun) assert(checkRun.conclusion === 'success', `17e: NOP check run is success (got: ${checkRun.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const driftRemoved = await poll(async () => {
+      const repos = await listInstallationRepoNames(installationId)
+      return !repos.includes(APP_TEST_REPOS[2]) ? repos : null
+    }, { desc: `drifted ${APP_TEST_REPOS[2]} to be removed by full sync`, timeout: 90000 })
+    assert(driftRemoved !== null, `17e: drift remediated — ${APP_TEST_REPOS[2]} removed by full sync`)
+
+    await deleteBranch(ORG, ADMIN_REPO, branch)
+  }
+
+  // ── 17f: Sub-org targeting (delta sync via suborgs/*.yml) ──────────────────
+  // A suborg config change triggers the delta sync path (not full sync). The
+  // suborg's targeting (here suborgrepos) resolves the repos to add/remove for
+  // the app. Entering this block the installation is 'selected' with
+  // APP_TEST_REPOS[0] and [1]; [2] is not selected.
+  {
+    // Step A: add a suborg that targets repo-3 and adds the app → repo-3 added.
+    log('17f: Adding a repo to the app via suborg targeting (suborgrepos, delta sync)')
+    const branchA = 'smoke-test-phase17f-add'
+    await deleteBranch(ORG, ADMIN_REPO, branchA)
+    await createBranch(ORG, ADMIN_REPO, branchA)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs/smoke-app-suborg.yml`, suborgAppInstallConfig([APP_TEST_REPOS[2]], app), branchA, '17f: suborg targeting adds smoke-app-repo-3 to app')
+    const prA = await createPR(ORG, ADMIN_REPO, '17f: app_installations suborg add', branchA, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRunA = await waitForCheckRun(ORG, ADMIN_REPO, prA.head.sha)
+    assert(checkRunA !== null, '17f: NOP check run completed (suborg add)')
+    if (checkRunA) assert(checkRunA.conclusion === 'success', `17f: NOP check run is success (got: ${checkRunA.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, prA.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const suborgAdded = await poll(async () => {
+      const i = await getAppInstallation(app)
+      if (!i || i.repository_selection !== 'selected') return null
+      const repos = await listInstallationRepoNames(i.id)
+      return repos.includes(APP_TEST_REPOS[2]) ? repos : null
+    }, { desc: `${APP_TEST_REPOS[2]} to be added via suborg targeting`, timeout: 90000 })
+    assert(suborgAdded !== null, `17f: ${APP_TEST_REPOS[2]} added to app via suborg targeting (delta sync)`)
+
+    await deleteBranch(ORG, ADMIN_REPO, branchA)
+
+    // Step B: narrow the suborg targeting so repo-3 drops out → repo-3 removed.
+    // Retarget to repo-1 (already selected by its repo config, so a no-op add);
+    // the delta unselection must remove repo-3.
+    log('17f: Narrowing suborg targeting so smoke-app-repo-3 drops out (delta unselection)')
+    const branchB = 'smoke-test-phase17f-narrow'
+    await deleteBranch(ORG, ADMIN_REPO, branchB)
+    await createBranch(ORG, ADMIN_REPO, branchB)
+    await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/suborgs/smoke-app-suborg.yml`, suborgAppInstallConfig([APP_TEST_REPOS[0]], app), branchB, '17f: narrow suborg targeting to smoke-app-repo-1')
+    const prB = await createPR(ORG, ADMIN_REPO, '17f: app_installations suborg narrow', branchB, defaultBranch)
+    log('Waiting for NOP check run...')
+    await sleep(WEBHOOK_SETTLE_MS)
+    const checkRunB = await waitForCheckRun(ORG, ADMIN_REPO, prB.head.sha)
+    assert(checkRunB !== null, '17f: NOP check run completed (suborg narrow)')
+    if (checkRunB) assert(checkRunB.conclusion === 'success', `17f: NOP check run is success (got: ${checkRunB.conclusion})`)
+    if (!await safeMerge(ORG, ADMIN_REPO, prB.number)) return
+    await sleep(WEBHOOK_SETTLE_MS + 15000)
+
+    const suborgRemoved = await poll(async () => {
+      const i = await getAppInstallation(app)
+      if (!i || i.repository_selection !== 'selected') return null
+      const repos = await listInstallationRepoNames(i.id)
+      return !repos.includes(APP_TEST_REPOS[2]) ? repos : null
+    }, { desc: `${APP_TEST_REPOS[2]} to be removed when dropped from suborg targeting`, timeout: 90000 })
+    assert(suborgRemoved !== null, `17f: ${APP_TEST_REPOS[2]} removed when dropped from suborg targeting (delta unselection)`)
+
+    await deleteBranch(ORG, ADMIN_REPO, branchB)
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main () {
@@ -2710,7 +3103,8 @@ async function main () {
   // Find installation for our org
   let installationId
   for await (const { installation } of app.eachInstallation.iterator()) {
-    if (installation.account && installation.account.login.toLowerCase() === ORG.toLowerCase()) {
+    // Org/user installations key off account.login (only enterprise accounts have a slug).
+    if (installation.account && installation.account.login && installation.account.login.toLowerCase() === ORG.toLowerCase()) {
       installationId = installation.id
       break
     }
@@ -2719,6 +3113,22 @@ async function main () {
 
   octokit = await app.getInstallationOctokit(installationId)
   log('Authenticated as GitHub App installation')
+
+  // Optionally resolve the enterprise installation for the app_installations
+  // plugin phase. The same App must be installed on the enterprise with the
+  // "Enterprise organization installations" permission.
+  if (GH_ENTERPRISE && APP_SLUGS.length > 0) {
+    for await (const { installation } of app.eachInstallation.iterator()) {
+      if (installation.target_type === 'Enterprise' &&
+          installation.account && installation.account.slug &&
+          installation.account.slug.toLowerCase() === GH_ENTERPRISE.toLowerCase()) {
+        entOctokit = await app.getInstallationOctokit(installation.id)
+        log(`Authenticated as enterprise installation for '${GH_ENTERPRISE}' (app_installations phase enabled)`)
+        break
+      }
+    }
+    if (!entOctokit) log(`\x1b[33m⚠ No enterprise installation found for '${GH_ENTERPRISE}' — Phase 17 will report a failure.\x1b[0m`)
+  }
 
   console.log(`
 \x1b[36m╔══════════════════════════════════════╗
@@ -2752,7 +3162,8 @@ async function main () {
       ['Phase 13: variables', phase13Variables],
       ['Phase 14: regressions', phase14RegressionCoverage],
       ['Phase 15: Ruleset array drift', phase15RulesetArrayDrift],
-      ['Phase 16: Ruleset name/slug resolution', phase16RulesetNameResolution]
+      ['Phase 16: Ruleset name/slug resolution', phase16RulesetNameResolution],
+      ['Phase 17: App installation management', phase17AppInstallations]
     ]
 
     // When --phase is given, only run setup (phase 0) + the requested phase(s).
