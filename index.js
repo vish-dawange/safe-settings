@@ -6,6 +6,7 @@ const Glob = require('./lib/glob')
 const ConfigManager = require('./lib/configManager')
 const NopCommand = require('./lib/nopcommand')
 const SettingsGenerator = require('./lib/settingsGenerator')
+const AppOctokitClient = require('./lib/appOctokitClient')
 const env = require('./lib/env')
 
 let deploymentConfig
@@ -287,6 +288,61 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       const app = await github.apps.getAuthenticated()
       appSlug = app.data.slug
       robot.log.debug(`Validated the app is configured properly = \n${JSON.stringify(app.data, null, 2)}`)
+    }
+
+    await verifyAppInstallationsPlugin(installations)
+  }
+
+  /**
+   * Verifies that the app-installations plugin can function properly.
+   *
+   * When the `GH_ENTERPRISE` env variable is set, this:
+   *   1. Finds the enterprise installation matching the slug.
+   *   2. Mints an installation token for that enterprise installation.
+   *   3. Confirms the token has permission to manage app installations in the
+   *      target org (`GH_ORG`) by listing the org's app installations via the
+   *      Enterprise organization installations API.
+   *
+   * If `GH_ENTERPRISE` is not set, this verification is skipped entirely.
+   *
+   * @param {Array} installations - The app's installations (JWT-listed)
+   */
+  async function verifyAppInstallationsPlugin (installations) {
+    const enterpriseSlug = process.env.GH_ENTERPRISE
+    if (!enterpriseSlug) {
+      robot.log.debug('GH_ENTERPRISE is not set — skipping app-installations plugin verification')
+      return
+    }
+
+    const org = process.env.GH_ORG
+    if (!org) {
+      robot.log.warn('GH_ENTERPRISE is set but GH_ORG is not — cannot verify app-installations plugin without a target org')
+      return
+    }
+
+    // Find the installation targeting this enterprise
+    const enterpriseInstallation = (installations || []).find(
+      i => i.target_type === 'Enterprise' && i.account && i.account.slug === enterpriseSlug
+    )
+    if (!enterpriseInstallation) {
+      robot.log.warn(`No enterprise installation found for slug '${enterpriseSlug}'. App-installations plugin will not be able to manage app access. Ensure safe-settings is installed on the enterprise.`)
+      return
+    }
+
+    try {
+      // Mint an installation token for the enterprise installation
+      const enterpriseGithub = await robot.auth(enterpriseInstallation.id)
+      const client = new AppOctokitClient({
+        github: enterpriseGithub,
+        enterpriseSlug,
+        log: robot.log
+      })
+
+      // Confirm the token can list org app installations (validates permission)
+      const orgInstallations = await client.listOrgInstallations(org)
+      robot.log.info(`App-installations plugin verified: enterprise '${enterpriseSlug}' installation (id: ${enterpriseInstallation.id}) can manage apps in org '${org}' (${orgInstallations.length} installation(s) visible)`)
+    } catch (e) {
+      robot.log.error(`App-installations plugin verification failed for enterprise '${enterpriseSlug}' / org '${org}': ${e.message}`)
     }
   }
 
