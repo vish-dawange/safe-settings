@@ -141,5 +141,5 @@ samconfig.toml
 test.log
 reports
 
-#all general log files
+# all general log files
 *.log
