@@ -1694,12 +1694,12 @@ repository:
       expect(result[0].repository_unselection.sort()).toEqual(['repo-a'])
     })
 
-    it('skips apps configured as repository_selection: all at org level', async () => {
+    it('skips apps configured at the org level (org entry implies all repos)', async () => {
       jest.spyOn(RepoSelector.prototype, 'resolve').mockResolvedValue(new Set(['repo-a']))
 
       settings.config = {
         ...settings.config,
-        app_installations: [{ app_slug: 'my-app', repository_selection: 'all' }]
+        app_installations: [{ app_slug: 'my-app' }]
       }
       settings.subOrgConfigs = {
         frontend: { suborgrepos: ['repo-a'], app_installations: [{ app_slug: 'my-app' }] }
