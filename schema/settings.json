@@ -259,7 +259,7 @@
       }
     },
     "additive_plugins": {
-      "description": "List of Diffable plugins to run in additive mode. In additive mode the plugin will only add and update entries; it will never call remove(), so items that exist on GitHub but are absent from the YAML are preserved. Only Diffable-extending plugins are supported (labels, collaborators, teams, milestones, autolinks, environments, custom_properties, variables, rulesets, custom_repository_roles). The app_installations plugin also honors additive mode (only adds repos to installations, never removes). Declare only in settings.yml (org level) to keep behavior consistent across all repos.",
+      "description": "List of plugins to run in additive mode. In additive mode the plugin will only add and update entries; it will never call remove(), so items that exist on GitHub but are absent from the YAML are preserved. Supported plugins: labels, collaborators, teams, milestones, autolinks, environments, custom_properties, variables, rulesets, custom_repository_roles, app_installations. Declare only in settings.yml (org level) to keep behavior consistent across all repos.",
       "type": "array",
       "items": {
         "type": "string",
