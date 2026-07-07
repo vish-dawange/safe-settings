@@ -13,7 +13,10 @@ let deploymentConfig
 
 module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) => {
   let appSlug = 'safe-settings'
-  let cachedEnterpriseInstallationId = null
+  // Cache of enterprise slug → enterprise installation id. Keyed by slug so a
+  // cached id is never reused for a different enterprise (e.g. when the app
+  // handles events from multiple enterprises).
+  const cachedEnterpriseInstallationIds = new Map()
   async function syncAllSettings (nop, context, repo = context.repo(), ref, baseRef, changedFiles = {}) {
     try {
       deploymentConfig = await loadYamlFileSystem()
@@ -155,9 +158,10 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
    * client authenticated with the enterprise installation token, along with
    * the installation ID.
    *
-   * Uses the cached enterprise installation ID when available to avoid
-   * re-listing installations. Returns null if no matching enterprise
-   * installation is found.
+   * Uses the cached enterprise installation ID for the given slug when
+   * available to avoid re-listing installations. The cache is keyed by
+   * enterprise slug so an id is never reused across enterprises. Returns null
+   * if no matching enterprise installation is found.
    *
    * @param {string} enterpriseSlug - Enterprise slug
    * @returns {Promise<{ appGithub: object, installationId: number } | null>}
@@ -165,10 +169,13 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
   async function getEnterpriseAppClient (enterpriseSlug) {
     if (!enterpriseSlug) return null
 
-    // Use cached enterprise installation ID if available
-    if (cachedEnterpriseInstallationId) {
-      const appGithub = await robot.auth(cachedEnterpriseInstallationId)
-      return { appGithub, installationId: cachedEnterpriseInstallationId }
+    // Use the cached enterprise installation id for THIS slug if available.
+    // Keying by slug ensures a cached id is never reused for a different
+    // enterprise.
+    const cachedId = cachedEnterpriseInstallationIds.get(enterpriseSlug)
+    if (cachedId) {
+      const appGithub = await robot.auth(cachedId)
+      return { appGithub, installationId: cachedId }
     }
 
     // Get a JWT-authenticated client to list all installations
@@ -183,7 +190,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     if (!enterpriseInstallation) {
       return null
     }
-    cachedEnterpriseInstallationId = enterpriseInstallation.id
+    cachedEnterpriseInstallationIds.set(enterpriseSlug, enterpriseInstallation.id)
     const enterpriseGithub = await robot.auth(enterpriseInstallation.id)
     return { appGithub: enterpriseGithub, installationId: enterpriseInstallation.id }
   }
@@ -310,7 +317,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       const github = await robot.auth(installation.id)
       const app = await github.apps.getAuthenticated()
       appSlug = app.data.slug
-      robot.log.debug(`Validated the app is configured properly = \n${JSON.stringify(app.data, null, 2)}`)
+      robot.log.info(`Validated the app is configured properly = \n${JSON.stringify(app.data, null, 2)}`)
     }
 
     await verifyAppInstallationsPlugin()
@@ -331,7 +338,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
   async function verifyAppInstallationsPlugin () {
     const enterpriseSlug = process.env.GH_ENTERPRISE
     if (!enterpriseSlug) {
-      robot.log.debug('GH_ENTERPRISE is not set — skipping app-installations plugin verification')
+      robot.log.info('GH_ENTERPRISE is not set — skipping app-installations plugin verification')
       return
     }
 
