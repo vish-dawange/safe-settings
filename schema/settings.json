@@ -235,7 +235,7 @@
       }
     },
     "app_installations": {
-      "description": "Manage which repositories a GitHub App installation can access. The target is a GitHub App installation rather than a repository. Repo selection follows the config hierarchy: org-level settings.yml selects all repos (repository_selection: all); suborgs/*.yml selects repos by the suborg's targeting criteria; repos/*.yml adds the specific repo. Requires safe-settings to be installed on the enterprise with 'Enterprise organization installations' permission.",
+      "description": "Manage which repositories a GitHub App installation can access. The target is a GitHub App installation rather than a repository. Repo selection follows the config hierarchy: org-level settings.yml selects all repos in the org; suborgs/*.yml selects repos by the suborg's targeting criteria; repos/*.yml adds the specific repo. Requires safe-settings to be installed on the enterprise with 'Enterprise organization installations' permission.",
       "type": "array",
       "items": {
         "type": "object",
@@ -247,13 +247,6 @@
           "app_slug": {
             "type": "string",
             "description": "The slug of the GitHub App installation to manage."
-          },
-          "repository_selection": {
-            "type": "string",
-            "enum": [
-              "all"
-            ],
-            "description": "Only valid at the org level (settings.yml). 'all' selects every repository in the org and takes precedence over any suborg/repo-level selections."
           }
         }
       }

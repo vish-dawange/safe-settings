@@ -2,9 +2,10 @@
 
 - Status: Accepted
 - Date: 2026-07-06
-- Last updated: 2026-07-06 — added reporting subject model, per-repo pipeline
-  exclusion, startup verification, non-managed-app safety guarantee, and smoke
-  tests.
+- Last updated: 2026-07-07 — added reporting subject model, per-repo pipeline
+  exclusion, startup verification, non-managed-app safety guarantee, smoke
+  tests, and removed the redundant `repository_selection` config attribute
+  (org level is implicitly "all").
 - Deciders: safe-settings maintainers
 - Related PR: `decyjphr-app-installation-plugin`
 
@@ -19,7 +20,8 @@ applied by `syncAll` / `syncSelectedRepos` / `sync`.
 We need a new capability where the **target of the operation is a GitHub App
 installation** rather than a repository. Concretely, safe-settings should
 declaratively control **which repositories each installed GitHub App can
-access** (`repository_selection`), driven by the same config hierarchy:
+access** (the installation's repository access), driven by the same config
+hierarchy:
 
 - **Org-level `settings.yml`** → the app should have access to **all** repos in
   the org.
@@ -146,8 +148,11 @@ To fix this without a disruptive rename of the repo-centric reporting pipeline,
    reuse existing `getReposForTeam` / `getRepositoriesByProperty` patterns.
 
 4. **Org-level "all" takes precedence** over any suborg/repo-level selection or
-   exclusion. If an app is "all" at org level, the installation is toggled to
-   `all` and deltas for that app are skipped.
+   exclusion. An org-level `app_installations` entry lists only the `app_slug`
+   — it always implies **all** repos (there is no `repository_selection` config
+   attribute; it was removed as redundant). When an app is named at the org
+   level, the installation is toggled to `all` and deltas for that app are
+   skipped.
 
 5. **Repository NAMES, not IDs.** The Enterprise Org Installations API accepts
    names, so the plugin no longer resolves names → IDs or enumerates all repos

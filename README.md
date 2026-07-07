@@ -692,12 +692,12 @@ are selected for the app:
 
 | Layer | File | Repos selected for the app |
 | --- | --- | --- |
-| Org | `settings.yml` | All repos in the org (`repository_selection: all`) |
+| Org | `settings.yml` | All repos in the org |
 | Suborg | `suborgs/*.yml` | Repos matching the suborg's targeting (`suborgrepos`, `suborgteams`, `suborgproperties`) |
 | Repo | `repos/<repo>.yml` | That specific repo |
 
 > [!important]
-> An app configured with `repository_selection: all` at the **org** level takes
+> An app listed at the **org** level (which implies all repos) takes
 > precedence. Suborg/repo-level selections for that same app are ignored, and
 > repos are never removed from it by incremental (suborg/repo) changes — it is
 > reconciled only by the full (scheduled) sync.
@@ -709,7 +709,6 @@ Org-level `settings.yml` — give an app access to **all** repos in the org:
 ```yaml
 app_installations:
   - app_slug: my-internal-app
-    repository_selection: all
 ```
 
 Suborg-level `suborgs/backend.yml` — give an app access to the repos targeted

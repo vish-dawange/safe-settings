@@ -2806,10 +2806,9 @@ async function phase16RulesetNameResolution () {
 // ─── App installation config builders (Phase 17) ─────────────────────────────
 
 // Org-level settings.yml giving an app access to ALL repos.
-const settingsAppInstallAll = (slug) => `# App installations: org-level repository_selection all
+const settingsAppInstallAll = (slug) => `# App installations: org-level (implies all repos)
 app_installations:
   - app_slug: ${slug}
-    repository_selection: all
 `
 
 // Empty org settings (no app_installations) with an optional comment bump to
