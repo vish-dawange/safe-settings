@@ -154,6 +154,32 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     }
   }
   /**
+   * Lists all installations of the app using a JWT-authenticated client.
+   *
+   * @returns {Promise<Array>} All app installations
+   */
+  async function listAllInstallations () {
+    const github = await robot.auth()
+    return github.paginate(
+      github.apps.listInstallations.endpoint.merge({ per_page: 100 })
+    )
+  }
+
+  /**
+   * Finds the enterprise installation matching the given slug from the app's
+   * installation list. Returns null if none matches.
+   *
+   * @param {string} enterpriseSlug - Enterprise slug
+   * @returns {Promise<object|null>} The matching enterprise installation
+   */
+  async function findEnterpriseInstallation (enterpriseSlug) {
+    const installations = await listAllInstallations()
+    return installations.find(
+      i => i.target_type === 'Enterprise' && i.account && i.account.slug === enterpriseSlug
+    ) || null
+  }
+
+  /**
    * Finds the enterprise installation for a given slug and returns an Octokit
    * client authenticated with the enterprise installation token, along with
    * the installation ID.
@@ -178,15 +204,8 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
       return { appGithub, installationId: cachedId }
     }
 
-    // Get a JWT-authenticated client to list all installations
-    const appGithub = await robot.auth()
-    const installations = await appGithub.paginate(
-      appGithub.apps.listInstallations.endpoint.merge({ per_page: 100 })
-    )
     // Find the installation targeting this enterprise
-    const enterpriseInstallation = installations.find(
-      i => i.target_type === 'Enterprise' && i.account && i.account.slug === enterpriseSlug
-    )
+    const enterpriseInstallation = await findEnterpriseInstallation(enterpriseSlug)
     if (!enterpriseInstallation) {
       return null
     }
@@ -307,10 +326,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
   }
 
   async function info () {
-    const github = await robot.auth()
-    const installations = await github.paginate(
-      github.apps.listInstallations.endpoint.merge({ per_page: 100 })
-    )
+    const installations = await listAllInstallations()
     robot.log.debug(`installations: ${JSON.stringify(installations)}`)
     if (installations.length > 0) {
       const installation = installations[0]
@@ -371,11 +387,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
 
   async function syncInstallation (nop = false) {
     robot.log.trace('Fetching installations')
-    const github = await robot.auth()
-
-    const installations = await github.paginate(
-      github.apps.listInstallations.endpoint.merge({ per_page: 100 })
-    )
+    const installations = await listAllInstallations()
 
     if (installations.length > 0) {
       const installation = installations[0]
