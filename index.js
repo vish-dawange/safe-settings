@@ -224,19 +224,22 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
    */
   async function enrichContextWithEnterprise (context) {
     const { payload } = context
-    const enterprise = payload.enterprise || (payload.installation && payload.installation.enterprise)
-    if (enterprise && enterprise.slug) {
-      context.enterpriseSlug = enterprise.slug
-      try {
-        const result = await getEnterpriseAppClient(enterprise.slug)
-        if (result) {
-          context.appGithub = result.appGithub
-        } else {
-          robot.log.debug(`No enterprise installation found for slug '${enterprise.slug}'. App installation management will not be available.`)
-        }
-      } catch (e) {
-        robot.log.debug(`Could not create enterprise-authenticated client: ${e.message}`)
+    const slugFromPayload = (payload.enterprise && payload.enterprise.slug) ||
+      (payload.installation && payload.installation.enterprise && payload.installation.enterprise.slug)
+    const enterpriseSlug = slugFromPayload || process.env.GH_ENTERPRISE
+
+    if (!enterpriseSlug) return
+
+    context.enterpriseSlug = enterpriseSlug
+    try {
+      const result = await getEnterpriseAppClient(enterpriseSlug)
+      if (result) {
+        context.appGithub = result.appGithub
+      } else {
+        robot.log.debug(`No enterprise installation found for slug '${enterpriseSlug}'. App installation management will not be available.`)
       }
+    } catch (e) {
+      robot.log.debug(`Could not create enterprise-authenticated client: ${e.message}`)
     }
   }
 
