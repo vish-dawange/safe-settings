@@ -127,6 +127,42 @@ describe('AppInstallations', () => {
       // config and added by another ends up present.
       expect(callOrder).toEqual(['remove', 'add'])
     })
+
+    it('accepts array-based selection/unselection (Settings._buildAppChangesFromDelta output shape)', async () => {
+      // Settings._buildAppChangesFromDelta returns arrays (not Sets). The
+      // plugin must treat them the same as Sets, otherwise real add/remove
+      // operations are silently skipped.
+      const routes = []
+      appGithub.request.mockImplementation((route) => {
+        routes.push(route)
+        return Promise.resolve({ data: {} })
+      })
+
+      const plugin = new AppInstallations(false, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      await plugin.syncDelta([{
+        app_slug: 'copilot',
+        installation_id: 1,
+        repository_selection: ['repo-a'],
+        repository_unselection: ['repo-b']
+      }])
+
+      expect(routes.some(r => r.includes('/repositories/add'))).toBe(true)
+      expect(routes.some(r => r.includes('/repositories/remove'))).toBe(true)
+    })
+
+    it('generates NopCommand for array-based selection/unselection in nop mode', async () => {
+      const plugin = new AppInstallations(true, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      const result = await plugin.syncDelta([{
+        app_slug: 'copilot',
+        installation_id: 1,
+        repository_selection: ['repo-a', 'repo-b'],
+        repository_unselection: ['repo-c']
+      }])
+
+      expect(result).toHaveLength(1)
+      expect(result[0].action.additions).toEqual(['repo-a', 'repo-b'])
+      expect(result[0].action.deletions).toEqual(['repo-c'])
+    })
   })
 
   describe('syncFull', () => {
