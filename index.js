@@ -200,8 +200,12 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     // enterprise.
     const cachedId = cachedEnterpriseInstallationIds.get(enterpriseSlug)
     if (cachedId) {
-      const appGithub = await robot.auth(cachedId)
-      return { appGithub, installationId: cachedId }
+      try {
+        const appGithub = await robot.auth(cachedId)
+        return { appGithub, installationId: cachedId }
+      } catch (e) {
+        cachedEnterpriseInstallationIds.delete(enterpriseSlug)
+      }
     }
 
     // Find the installation targeting this enterprise
