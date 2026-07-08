@@ -158,9 +158,18 @@ To fix this without a disruptive rename of the repo-centric reporting pipeline,
    names, so the plugin no longer resolves names → IDs or enumerates all repos
    for the "all" case (it uses the native toggle instead).
 
-6. **Unselection before selection.** In both delta and full sync, removals are
-   applied before additions, so a repo removed by one config layer and added by
-   another ends up **present** (net-correct even with transient churn).
+6. **Unselection before selection (delta); selection before unselection (full
+   sync).** In **delta** mode the add/remove sets can overlap across config
+   layers, so removals are applied first and additions second — a repo removed
+   by one layer and added by another ends up **present** (net-correct even with
+   transient churn). In **full sync** the add/remove sets are disjoint by
+   construction (`toAdd = desired − live`, `toRemove = live − desired`), so
+   ordering does not change the final set; there, additions are applied
+   **before** removals so a "swap" (e.g. live `{A}` → desired `{B}`) never drops
+   the `selected` installation to zero repositories, which the Enterprise API
+   rejects with `422`. Reconciling a `selected` installation to an **empty**
+   desired set is impossible (it must keep ≥1 repo); this is surfaced as a
+   descriptive error rather than attempted.
 
 7. **Churn skip.** In delta mode, if an app's targeting is unchanged between the
    previous and current versions of a file, it is skipped entirely to avoid

@@ -282,5 +282,64 @@ describe('AppInstallations', () => {
       expect(result).toEqual([])
       expect(appGithub.request).not.toHaveBeenCalled()
     })
+
+    it('applies additions before removals to avoid a transient empty selection (422-safe swap)', async () => {
+      // live = {repo-a}; desired = {repo-b} → swap. Removing first could drop the
+      // installation to zero repos (422); additions must be applied first.
+      appGithub.paginate.mockResolvedValue([{ name: 'repo-a', id: 10 }])
+      const routes = []
+      appGithub.request.mockImplementation((route) => {
+        routes.push(route)
+        return Promise.resolve({ data: {} })
+      })
+
+      const plugin = new AppInstallations(false, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      await plugin.syncFull({
+        copilot: { installation_id: 1, repos: new Set(['repo-b']), current_selection: 'selected' }
+      })
+
+      const addIdx = routes.findIndex(r => r.includes('/repositories/add'))
+      const removeIdx = routes.findIndex(r => r.includes('/repositories/remove'))
+      expect(addIdx).toBeGreaterThanOrEqual(0)
+      expect(removeIdx).toBeGreaterThanOrEqual(0)
+      expect(addIdx).toBeLessThan(removeIdx)
+    })
+
+    it("errors (without mutating) when the desired repo set is empty for a 'selected' installation", async () => {
+      appGithub.paginate.mockResolvedValue([{ name: 'repo-a', id: 10 }])
+
+      const plugin = new AppInstallations(true, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      const result = await plugin.syncFull({
+        copilot: { installation_id: 1, repos: new Set(), current_selection: 'selected' }
+      })
+
+      expect(result).toHaveLength(1)
+      expect(result[0].type).toBe('ERROR')
+      expect(errors.some(e => /zero repositories/i.test(e.msg))).toBe(true)
+      expect(appGithub.request).not.toHaveBeenCalled()
+    })
+
+    it('records a descriptive error when removal is rejected with 422', async () => {
+      appGithub.paginate.mockResolvedValue([
+        { name: 'repo-a', id: 10 },
+        { name: 'repo-b', id: 20 }
+      ])
+      appGithub.request.mockImplementation((route) => {
+        if (route.includes('/repositories/remove')) {
+          return Promise.reject(Object.assign(new Error('Unprocessable'), { status: 422 }))
+        }
+        return Promise.resolve({ data: {} })
+      })
+
+      const plugin = new AppInstallations(false, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      // desired = {repo-a}; live = {repo-a, repo-b} → toRemove = [repo-b]
+      const result = await plugin.syncFull({
+        copilot: { installation_id: 1, repos: new Set(['repo-a']), current_selection: 'selected' }
+      })
+
+      // The 422 is caught and recorded, not thrown out of syncFull.
+      expect(Array.isArray(result)).toBe(true)
+      expect(errors.some(e => /422/.test(e.msg))).toBe(true)
+    })
   })
 })
