@@ -2,10 +2,13 @@
 
 - Status: Accepted
 - Date: 2026-07-06
-- Last updated: 2026-07-07 — added reporting subject model, per-repo pipeline
-  exclusion, startup verification, non-managed-app safety guarantee, smoke
-  tests, and removed the redundant `repository_selection` config attribute
-  (org level is implicitly "all").
+- Last updated: 2026-07-08 — documented the repo-centric → app-centric shift and
+  the delta/full-sync model, and made reconciliation 422-safe (additions before
+  removals in both paths, with an explicit error when a `selected` installation
+  would be reduced to zero repositories). Earlier (2026-07-07): reporting subject
+  model, per-repo pipeline exclusion, startup verification, non-managed-app
+  safety guarantee, smoke tests, and removal of the redundant
+  `repository_selection` config attribute (org level is implicitly "all").
 - Deciders: safe-settings maintainers
 - Related PR: `decyjphr-app-installation-plugin`
 
@@ -47,6 +50,26 @@ Copilot policies) without another ground-up rewrite.
 
 Add an `app_installations` plugin plus supporting infrastructure, wired into
 the existing sync pipeline as a **separate phase**.
+
+This capability shifts safe-settings from a purely **repo-centric** model toward
+a more general one. Until now, a trigger — a change to `settings.yml`, a
+`suborgs/*.yml`, or a `repos/*.yml` — caused `syncAll` or `syncSelectedRepos` to
+resolve a **collection of repositories** and invoke each plugin against them.
+App installation management inverts part of that flow: a change still resolves a
+collection of repositories, but it **also** resolves a **collection of
+applications**, which are then processed iteratively. For each application the
+plugin computes the set of repositories that should constitute its
+`repository_selection`.
+
+The subtlety is that a single `repos/*.yml` change surfaces only **one**
+repository in the changed set, whereas an app's desired access is the **union of
+every** repository that currently targets it — conceptually `existing + new`.
+Removal is harder still: to know which repositories an app should *lose*, we must
+compare against the repositories derived from the **previous commit** on the
+default branch. We call the process of computing these per-app additions and
+deletions from a config change **delta sync**; a complementary **full sync**
+recomputes each app's complete desired state from scratch to reconcile
+configuration drift. Both are detailed under *Sync model* below.
 
 ### Configuration shape
 
