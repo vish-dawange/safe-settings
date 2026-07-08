@@ -175,7 +175,7 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
   async function findEnterpriseInstallation (enterpriseSlug) {
     const installations = await listAllInstallations()
     return installations.find(
-      i => i.target_type === 'Enterprise' && i.account && i.account.slug === enterpriseSlug
+      i => i.target_type === 'Enterprise' && i.account && `${i.account.slug}`.toLowerCase() === enterpriseSlug.toLowerCase()
     ) || null
   }
 
@@ -194,6 +194,8 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
    */
   async function getEnterpriseAppClient (enterpriseSlug) {
     if (!enterpriseSlug) return null
+    // Normalize the slug to lowercase for consistent cache keying
+    enterpriseSlug = enterpriseSlug.toLowerCase()
 
     // Use the cached enterprise installation id for THIS slug if available.
     // Keying by slug ensures a cached id is never reused for a different
