@@ -738,7 +738,7 @@ still selects them.
   file changes. Only the apps affected by the changed file are reconciled: the
   previous version of the file is compared with the new one to compute repos to
   add (`repository_selection`) and repos to remove (`repository_unselection`).
-  Removals are applied before additions, so a repo removed by one config and
+  Additions are applied before removals (422-safe swap), so a repo removed by one config and
   added by another ends up present.
 - **Full sync** runs on the schedule (cron), on manual sync, and when
   `settings.yml` changes. It recomputes the full desired state for every managed

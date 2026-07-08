@@ -76,16 +76,16 @@ configuration drift. Both are detailed under *Sync model* below.
 ```yaml
 # settings.yml (org level) — implies "all repos"
 app_installations:
-  - app_slug: copilot
-  - app_slug: dependabot
+  - app_slug: ghas-compliance-decyjphr-emu
+  - app_slug: migrator-destination-dotcom
 
 # suborgs/team-a.yml — repos selected by this suborg's criteria
 app_installations:
-  - app_slug: copilot
+  - app_slug: migrator-destination-dotcom
 
 # repos/my-repo.yml — this specific repo
 app_installations:
-  - app_slug: copilot
+  - app_slug: migrator-destination-dotcom
 ```
 
 ### Components
