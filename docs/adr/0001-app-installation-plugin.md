@@ -158,18 +158,20 @@ To fix this without a disruptive rename of the repo-centric reporting pipeline,
    names, so the plugin no longer resolves names → IDs or enumerates all repos
    for the "all" case (it uses the native toggle instead).
 
-6. **Unselection before selection (delta); selection before unselection (full
-   sync).** In **delta** mode the add/remove sets can overlap across config
-   layers, so removals are applied first and additions second — a repo removed
-   by one layer and added by another ends up **present** (net-correct even with
-   transient churn). In **full sync** the add/remove sets are disjoint by
-   construction (`toAdd = desired − live`, `toRemove = live − desired`), so
-   ordering does not change the final set; there, additions are applied
-   **before** removals so a "swap" (e.g. live `{A}` → desired `{B}`) never drops
-   the `selected` installation to zero repositories, which the Enterprise API
-   rejects with `422`. Reconciling a `selected` installation to an **empty**
-   desired set is impossible (it must keep ≥1 repo); this is surfaced as a
-   descriptive error rather than attempted.
+6. **Additions before removals (both delta and full sync).** The add/remove
+   sets are always disjoint before they are applied: in **delta** mode
+   `_buildAppChangesFromDelta` drops any repo appearing in both selection and
+   unselection (selection wins), and in **full sync** they are disjoint by
+   construction (`toAdd = desired − live`, `toRemove = live − desired`). Because
+   the sets are disjoint, ordering does not change the final repo set — so
+   additions are applied **first** in both paths. Adding first prevents a
+   "swap" (e.g. live `{A}` → desired `{B}`) from momentarily dropping a
+   `selected` installation to zero repositories, which the Enterprise API
+   rejects with `422`. Full sync knows the complete desired set, so it also
+   detects an **empty** desired set up-front and errors rather than attempting
+   an impossible reconcile-to-zero. Delta does not fetch live state, so it
+   cannot detect that case proactively; it catches the `422` on removal, emits a
+   descriptive error, and defers the correct end state to the next full sync.
 
 7. **Churn skip.** In delta mode, if an app's targeting is unchanged between the
    previous and current versions of a file, it is skipped entirely to avoid
@@ -178,8 +180,8 @@ To fix this without a disruptive rename of the repo-centric reporting pipeline,
 8. **Full-sync `current_selection` awareness.** Full sync reads each
    installation's live `repository_selection` and chooses the minimal action:
    skip when already correct; toggle `all` ↔ `selected`; or diff names and
-   remove-then-add when already `selected`. In `additive` mode it never narrows
-   an `all` installation.
+   add-then-remove when already `selected` (see decision #6). In `additive` mode
+   it never narrows an `all` installation.
 
 9. **`disable_plugins` / `additive_plugins` support.** `app_installations`
    participates in the same gating: it can be disabled at any layer, and in
@@ -245,9 +247,12 @@ To fix this without a disruptive rename of the repo-centric reporting pipeline,
   `installation.repositories_added/removed` handler was intentionally **removed**
   because it could not detect managed-app drift; only `installation_target` is
   retained. Drift on managed apps is reconciled on the next cron full sync.
-- **Multi-suborg overlap can briefly churn** in delta mode (a repo may be
-  removed then re-added within a run). The unselection-before-selection ordering
-  guarantees the net end state is correct.
+- **Multi-suborg overlap** in delta mode is handled by de-duplicating the
+  selection/unselection sets (selection wins) and applying additions before
+  removals, so the net end state is correct and a `selected` installation is
+  never momentarily emptied. A removal that would still drop the installation to
+  zero repos (which delta cannot detect without a live-state fetch) is caught as
+  a `422`, reported, and reconciled by the next full sync.
 - Requires an enterprise-level installation with the specific permission; orgs
   not on enterprise cannot use the plugin.
 

@@ -107,7 +107,7 @@ describe('AppInstallations', () => {
       expect(result[0].action.deletions).toBeNull()
     })
 
-    it('processes unselections before selections in non-nop mode', async () => {
+    it('processes additions before unselections in non-nop mode (422-safe swap)', async () => {
       const callOrder = []
       appGithub.request.mockImplementation((route) => {
         if (route.includes('/repositories/remove')) callOrder.push('remove')
@@ -123,9 +123,32 @@ describe('AppInstallations', () => {
         repository_unselection: new Set(['repo-b'])
       }])
 
-      // Removal must be applied before addition so a repo removed by one
-      // config and added by another ends up present.
-      expect(callOrder).toEqual(['remove', 'add'])
+      // Additions are applied before removals so a "swap" never drops the
+      // installation to zero repos (which the Enterprise API rejects with 422).
+      // Selection/unselection are already disjoint (dedup), so ordering does not
+      // affect the final set.
+      expect(callOrder).toEqual(['add', 'remove'])
+    })
+
+    it('records a descriptive error when a delta removal is rejected with 422', async () => {
+      appGithub.request.mockImplementation((route) => {
+        if (route.includes('/repositories/remove')) {
+          return Promise.reject(Object.assign(new Error('Unprocessable'), { status: 422 }))
+        }
+        return Promise.resolve({ data: {} })
+      })
+
+      const plugin = new AppInstallations(false, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      const result = await plugin.syncDelta([{
+        app_slug: 'copilot',
+        installation_id: 1,
+        repository_selection: new Set(),
+        repository_unselection: new Set(['repo-a'])
+      }])
+
+      // The 422 is caught and recorded, not thrown out of syncDelta.
+      expect(Array.isArray(result)).toBe(true)
+      expect(errors.some(e => /422/.test(e.msg))).toBe(true)
     })
 
     it('accepts array-based selection/unselection (Settings._buildAppChangesFromDelta output shape)', async () => {
