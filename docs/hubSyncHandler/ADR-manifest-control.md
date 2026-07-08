@@ -1,5 +1,9 @@
 # ADR: Manifest-Based Hub-Sync Control with Include/Exclude Rules
 
+**Status:** ✅ Implemented  
+**Date Created:** 2026-07-07  
+**Date Implemented:** 2026-07-07
+
 ## Context and Problem Statement
 
 The current hub-sync manifest (`globals/manifest.yml`) uses a simple rules-based structure with basic target organization selection. Users need more fine-grained control over:
