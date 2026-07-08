@@ -48,6 +48,210 @@ Both mechanisms use the same manifest.yml rules with `org_targets` and `files_to
 
 ---
 
+## Rule Precedence and Conflict Resolution
+
+### How Rules Are Evaluated
+
+Manifest rules use **OR logic** across multiple rules with **first-match-wins** behavior:
+
+1. **Rules are evaluated in ORDER** - Top-to-bottom in the YAML array
+2. **ANY rule can include** - If ANY enabled rule includes an org/file, it syncs
+3. **Within each rule**: `exclude` is checked FIRST, then `include`
+4. **First match wins** - As soon as a rule includes something, evaluation stops (returns TRUE)
+5. **If excluded by one rule** - Continues checking the next rule
+6. **No match = excluded** - If no rule includes it, it's excluded by default
+
+### Rule Precedence Matrix
+
+| Scenario | Rule 1 | Rule 2 | Result | Reason |
+|----------|--------|--------|--------|--------|
+| Both include | ✅ Include | ✅ Include | ✅ Synced | Rule 1 matches first, returns TRUE |
+| First excludes, second includes | ❌ Exclude | ✅ Include | ✅ Synced | Rule 1 skips, Rule 2 includes |
+| First includes, second excludes | ✅ Include | ❌ Exclude | ✅ Synced | Rule 1 matches first, Rule 2 never checked |
+| Both exclude | ❌ Exclude | ❌ Exclude | ❌ Skipped | No rule includes it |
+
+### Example: Conflicting Rules
+
+```yaml
+rules:
+  # Rule 1: Specific file to specific org
+  - name: test-file-to-test-org
+    enabled: true
+    org_targets:
+      include: ["ORG-TEST"]
+    files_to_sync:
+      include: ["suborgs/test.yml"]
+  
+  # Rule 2: All files to all orgs
+  - name: all-files-to-all-orgs
+    enabled: true
+    org_targets:
+      include: ["*"]
+    files_to_sync:
+      include: ["*.yml", "suborgs/*.yml"]
+```
+
+**Question**: Does `suborgs/test.yml` sync to `ORG-TEST`?
+
+**Answer**: ✅ **YES** - Rule 1 matches first and includes it. Rule 2 would also match, but Rule 1 already returned TRUE.
+
+**Question**: Does `suborgs/test.yml` sync to `ORG-PROD`?
+
+**Answer**: ✅ **YES** - Rule 1 doesn't match ORG-PROD (continues), Rule 2 matches ORG-PROD and the file pattern.
+
+**Question**: Does `suborgs/other.yml` sync to `ORG-TEST`?
+
+**Answer**: ✅ **YES** - Rule 1 doesn't match file pattern (continues), Rule 2 matches both org and file.
+
+### Example: Exclude Override with Multiple Rules
+
+```yaml
+rules:
+  # Rule 1: Exclude test file from test org
+  - name: block-test-file
+    enabled: true
+    org_targets:
+      include: ["ORG-TEST"]
+    files_to_sync:
+      include: ["*.yml"]
+      exclude: ["suborgs/test.yml"]  # Explicitly exclude
+  
+  # Rule 2: All files to all orgs
+  - name: all-files-all-orgs
+    enabled: true
+    org_targets:
+      include: ["*"]
+    files_to_sync:
+      include: ["suborgs/*.yml"]
+```
+
+**Question**: Does `suborgs/test.yml` sync to `ORG-TEST`?
+
+**Answer**: ✅ **YES** (Surprising!) - Here's why:
+1. Rule 1 matches ORG-TEST
+2. Rule 1 checks exclude first → matches `suborgs/test.yml` → EXCLUDED by this rule
+3. Rule 1 **continues** to Rule 2 (doesn't return FALSE, just moves to next rule)
+4. Rule 2 matches ORG-TEST (wildcard `*`)
+5. Rule 2 includes `suborgs/*.yml` → INCLUDED
+6. Returns TRUE - **file syncs**
+
+**Key Insight**: An exclude in one rule doesn't prevent another rule from including it. Rules use OR logic.
+
+### Example: True Exclusion Pattern
+
+If you want to **truly prevent** a file from syncing to an org, you need to **not have ANY rule that includes it**:
+
+```yaml
+rules:
+  # Rule 1: Most orgs get all files
+  - name: standard-orgs
+    enabled: true
+    org_targets:
+      include: ["*"]
+      exclude: ["ORG-TEST"]  # Exclude ORG-TEST from this rule
+    files_to_sync:
+      include: ["suborgs/*.yml"]
+  
+  # Rule 2: ORG-TEST gets selective files only
+  - name: test-org-limited
+    enabled: true
+    org_targets:
+      include: ["ORG-TEST"]
+    files_to_sync:
+      include: ["suborgs/allowed.yml"]  # Only specific files
+      exclude: ["suborgs/test.yml"]     # Not included here
+```
+
+**Result**: `suborgs/test.yml` does NOT sync to ORG-TEST because:
+- Rule 1 excludes ORG-TEST entirely
+- Rule 2 only includes `suborgs/allowed.yml`, not `suborgs/test.yml`
+- No rule includes the file for ORG-TEST → excluded
+
+### Within-Rule Precedence
+
+Within a **single rule**, exclude always wins:
+
+```yaml
+rules:
+  - name: confusing-rule
+    org_targets:
+      include: ["*"]
+    files_to_sync:
+      include: ["suborgs/*.yml"]
+      exclude: ["suborgs/test.yml"]
+```
+
+**Result**: All `suborgs/*.yml` files sync **EXCEPT** `suborgs/test.yml` (exclude wins within this rule).
+
+### Best Practice: Order Rules from Specific to General
+
+```yaml
+rules:
+  # Rule 1: Specific exceptions first
+  - name: test-org-exceptions
+    enabled: true
+    org_targets:
+      include: ["ORG-TEST"]
+    files_to_sync:
+      include: ["settings.yml"]  # ONLY settings.yml
+  
+  # Rule 2: General rules second
+  - name: all-other-orgs
+    enabled: true
+    org_targets:
+      include: ["*"]
+      exclude: ["ORG-TEST"]  # Already handled above
+    files_to_sync:
+      include: ["*.yml"]  # All files
+```
+
+**Advantage**: 
+- Specific rules are evaluated first
+- General rules don't conflict because specific orgs are excluded
+- Clear intent and easier to debug
+
+### Rule Order Matters: Example
+
+```yaml
+# Scenario A: General rule FIRST
+rules:
+  - name: all-files-all-orgs
+    org_targets:
+      include: ["*"]
+    files_to_sync:
+      include: ["*.yml"]
+  
+  - name: test-org-limited    # Never evaluated for files!
+    org_targets:
+      include: ["ORG-TEST"]
+    files_to_sync:
+      include: ["settings.yml"]
+      exclude: ["suborgs/*.yml"]
+```
+
+**Result**: ORG-TEST gets ALL files because Rule 1 matches first and returns TRUE. Rule 2 never gets a chance to exclude `suborgs/*.yml`.
+
+```yaml
+# Scenario B: Specific rule FIRST (Correct)
+rules:
+  - name: test-org-limited
+    org_targets:
+      include: ["ORG-TEST"]
+    files_to_sync:
+      include: ["settings.yml"]  # Only this
+  
+  - name: all-other-orgs
+    org_targets:
+      include: ["*"]
+      exclude: ["ORG-TEST"]
+    files_to_sync:
+      include: ["*.yml"]
+```
+
+**Result**: ORG-TEST gets ONLY `settings.yml` (Rule 1 matches first), other orgs get all files (Rule 2).
+
+---
+
 ## ⚠️ CRITICAL: File Merge vs. Replace Behavior
 
 Understanding this distinction is **essential** for proper configuration management.
@@ -772,6 +976,123 @@ Look for these log entries:
 - `"File settings.yml included by rule 'debug-org-name-1'"`
 - `"Org test-org not matched by any manifest rule - excluding from sync"`
 
+### Troubleshooting Rule Conflicts
+
+#### Issue: File unexpectedly syncing despite exclude rule
+
+**Symptom**: You added an exclude in one rule, but the file still syncs.
+
+**Example**:
+```yaml
+rules:
+  - name: exclude-test-files
+    org_targets: 
+      include: ["ORG-PROD"]
+    files_to_sync:
+      exclude: ["suborgs/test.yml"]  # Trying to block this
+  
+  - name: all-files-all-orgs
+    org_targets:
+      include: ["*"]
+    files_to_sync:
+      include: ["suborgs/*.yml"]      # But this includes it!
+```
+
+**Why**: Rule 2 includes the file for ORG-PROD, overriding Rule 1's exclude. Rules use OR logic.
+
+**Solution**: Use org exclusion instead of file exclusion:
+```yaml
+rules:
+  - name: all-files-most-orgs
+    org_targets:
+      include: ["*"]
+      exclude: ["ORG-PROD"]          # Exclude org from this rule
+    files_to_sync:
+      include: ["suborgs/*.yml"]
+  
+  - name: prod-selective-files
+    org_targets:
+      include: ["ORG-PROD"]
+    files_to_sync:
+      include: ["settings.yml"]       # Only specific files
+      # suborgs/test.yml NOT included
+```
+
+#### Issue: Specific rule being ignored
+
+**Symptom**: You created a specific rule for an org, but a general rule seems to override it.
+
+**Example**:
+```yaml
+rules:
+  - name: all-orgs-all-files
+    org_targets: ["*"]
+    files_to_sync: ["*.yml"]
+  
+  - name: test-org-settings-only   # Never reached!
+    org_targets: ["ORG-TEST"]
+    files_to_sync: ["settings.yml"]
+```
+
+**Why**: Rule 1 matches first (first-match-wins), so Rule 2 never evaluates.
+
+**Solution**: Reorder rules - specific before general:
+```yaml
+rules:
+  - name: test-org-settings-only    # Check this first
+    org_targets: ["ORG-TEST"]
+    files_to_sync: ["settings.yml"]
+  
+  - name: all-other-orgs-all-files  # Then general
+    org_targets: 
+      include: ["*"]
+      exclude: ["ORG-TEST"]          # Exclude already-handled orgs
+    files_to_sync: ["*.yml"]
+```
+
+#### Issue: Can't figure out which rule is matching
+
+**Symptom**: File syncs but you don't know why.
+
+**Solution**: Use clear rule names and check logs:
+
+```yaml
+rules:
+  - name: PROD-ONLY-settings         # Clear naming convention
+    org_targets: ["ORG-PROD"]
+    files_to_sync: ["settings.yml"]
+  
+  - name: ALL-ORGs-suborgs           # Indicates scope
+    org_targets: ["*"]
+    files_to_sync: ["suborgs/*.yml"]
+```
+
+Enable debug logging and search for:
+```
+"Org ORG-PROD included by rule 'PROD-ONLY-settings'"
+"File suborgs/backend.yml included by rule 'ALL-ORGs-suborgs'"
+```
+
+#### Issue: Exclude pattern not working as expected
+
+**Symptom**: Pattern like `exclude: ["suborgs/test.yml"]` doesn't match.
+
+**Why**: The file path being matched might be different (e.g., full path vs relative path).
+
+**Patterns checked** (from code):
+1. Just filename: `test.yml`
+2. Relative path (last 2 segments): `suborgs/test.yml`
+3. Full path: `globals/suborgs/test.yml` or `organizations/org-1/suborgs/test.yml`
+
+**Solution**: Use multiple patterns or glob matching:
+```yaml
+files_to_sync:
+  exclude: 
+    - "test.yml"               # Matches filename
+    - "suborgs/test.yml"       # Matches relative path
+    - "**/test.yml"            # Glob matches anywhere
+```
+
 ### Issue: Org-specific customizations being overwritten
 
 **Symptom**: You have `organizations/org-1/suborgs/backend.yml` with custom content, but it keeps getting replaced with `globals/suborgs/backend.yml`.
@@ -1200,6 +1521,29 @@ rules:
 | `suborgs/eu-*.yml` | EU suborgs | `suborgs/eu-west.yml`, `suborgs/eu-north.yml` |
 | `test-?` | Single char | `test-1`, `test-a` |
 | Literal | Exact match | `"org-1"` → only `org-1` |
+
+### Rule Precedence Quick Reference
+
+**How Rules Work**:
+- ✅ **OR logic** - ANY rule can include an org/file
+- 🔢 **Order matters** - Rules evaluated top-to-bottom
+- 🏆 **First match wins** - First rule to include returns TRUE immediately
+- 🚫 **Within rule** - Exclude checked before include
+- ➡️ **Exclude continues** - If excluded by one rule, checks next rule
+- ❌ **No match = excluded** - Default is to exclude if no rule includes
+
+**Key Rules**:
+1. Put **specific** rules BEFORE general rules
+2. An exclude in one rule doesn't prevent another rule from including
+3. To truly block something, ensure NO rule includes it
+4. Use clear rule names for debugging
+
+**Quick Test**: "Does file X sync to org Y?"
+1. Check rules in order (top to bottom)
+2. For each rule: Is rule enabled? → Does org match include (and not exclude)? → Does file match include (and not exclude)?
+3. If YES to all → **SYNCS** (stop checking)
+4. If NO to any → Try next rule
+5. If no rule matches → **EXCLUDED**
 
 ### Merge Strategies
 
