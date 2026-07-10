@@ -552,7 +552,8 @@ plugins for a given scope. Each entry is either:
 
 Valid plugin names: `repository`, `labels`, `collaborators`, `teams`,
 `milestones`, `branches`, `autolinks`, `validator`, `rulesets`, `environments`,
-`custom_properties`, `custom_repository_roles`, `variables`, `archive`.
+`custom_properties`, `custom_repository_roles`, `variables`, `archive`,
+`app_installations`.
 
 #### Strip matrix (which source layers are removed before merge)
 
@@ -661,6 +662,104 @@ additive_plugins:
   - collaborators
 ```
 
+### App installation management (`app_installations`)
+
+Most safe-settings plugins target a **repository**. The `app_installations`
+plugin is different: its target is a **GitHub App installation**. It lets you
+declaratively manage *which repositories a GitHub App can access* (the app's
+`repository_selection`), using the same `org` → `suborg` → `repo` config
+hierarchy you already use for repository settings.
+
+This is useful for controlling, as code, which repos apps such as Copilot,
+Dependabot, or your own internal apps are installed on across the org.
+
+#### Prerequisites
+
+- Safe-settings must be installed on the **enterprise** with the **Enterprise
+  organization installations** permission (see the
+  [Enterprise organization installations API](https://docs.github.com/en/enterprise-cloud@latest/rest/enterprise-admin/organization-installations)).
+  Managing app installations requires an enterprise-level token; the regular
+  org installation token is not sufficient. If safe-settings is not installed
+  on the enterprise with this permission, app installation sync is reported as
+  an error and skipped.
+- The enterprise slug is read from the webhook event payload
+  (`payload.enterprise.slug`); no extra environment variable is required.
+
+#### How repository selection is resolved
+
+The config layer where `app_installations` is declared determines which repos
+are selected for the app:
+
+| Layer | File | Repos selected for the app |
+| --- | --- | --- |
+| Org | `settings.yml` | All repos in the org |
+| Suborg | `suborgs/*.yml` | Repos matching the suborg's targeting (`suborgrepos`, `suborgteams`, `suborgproperties`) |
+| Repo | `repos/<repo>.yml` | That specific repo |
+
+> [!important]
+> An app listed at the **org** level (which implies all repos) takes
+> precedence. Suborg/repo-level selections for that same app are ignored, and
+> repos are never removed from it by incremental (suborg/repo) changes — it is
+> reconciled only by the full (scheduled) sync.
+
+#### Examples
+
+Org-level `settings.yml` — give an app access to **all** repos in the org:
+
+```yaml
+app_installations:
+  - app_slug: my-internal-app
+```
+
+Suborg-level `suborgs/backend.yml` — give an app access to the repos targeted
+by this suborg (here, all repos with the `Team=backend` custom property):
+
+```yaml
+suborgproperties:
+  - Team: backend
+app_installations:
+  - app_slug: my-internal-app
+```
+
+Repo-level `repos/my-repo.yml` — add this specific repo to the app:
+
+```yaml
+app_installations:
+  - app_slug: my-internal-app
+```
+
+Removing an app from a suborg/repo config (or changing the suborg's targeting)
+removes the affected repos from that app on the next sync, unless another layer
+still selects them.
+
+#### Sync behavior
+
+- **Incremental (delta) sync** runs when a `suborgs/*.yml` or `repos/*.yml`
+  file changes. Only the apps affected by the changed file are reconciled: the
+  previous version of the file is compared with the new one to compute repos to
+  add (`repository_selection`) and repos to remove (`repository_unselection`).
+  Additions are applied before removals (422-safe swap), so a repo removed by one config and
+  added by another ends up present.
+- **Full sync** runs on the schedule (cron), on manual sync, and when
+  `settings.yml` changes. It recomputes the full desired state for every managed
+  app across all layers and reconciles it against the live installation state.
+  This is the mechanism that corrects any configuration drift.
+- Add/remove operations are automatically batched in chunks of 50 repos (the
+  API limit).
+
+> [!note]
+> Drift on managed apps is reconciled by the **full (cron) sync**, not by
+> webhooks. A GitHub App only receives `installation` repository events for its
+> *own* installation, so safe-settings cannot detect — via webhooks — when a
+> human changes another app's repository access. Keep the scheduled sync enabled
+> for timely drift correction.
+
+#### Disabling and additive mode
+
+`app_installations` honors both [`disable_plugins`](#disabling-plugins-disable_plugins)
+and [`additive_plugins`](#additive-plugins-additive_plugins). In additive mode
+the plugin only **adds** repos to installations and never removes them.
+
 ### The Settings Files
 
 The settings files can be used to set the policies at the `org`, `suborg` or `repo` level.
@@ -680,6 +779,7 @@ The following can be configured:
 - `Repository name validation` using regex pattern
 - `Rulesets`
 - `Environments` - wait timer, required reviewers, prevent self review, protected branches deployment branch policy, custom deployment branch policy, variables, deployment protection rules
+- `App installations` - which repositories a GitHub App installation can access (see [App installation management](#app-installation-management-app_installations))
 
 See [`docs/sample-settings/settings.yml`](docs/sample-settings/settings.yml) for a sample settings file.
 
