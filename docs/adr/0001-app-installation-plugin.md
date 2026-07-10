@@ -190,11 +190,29 @@ To fix this without a disruptive rename of the repo-centric reporting pipeline,
    additions are applied **first** in both paths. Adding first prevents a
    "swap" (e.g. live `{A}` → desired `{B}`) from momentarily dropping a
    `selected` installation to zero repositories, which the Enterprise API
-   rejects with `422`. Full sync knows the complete desired set, so it also
-   detects an **empty** desired set up-front and errors rather than attempting
-   an impossible reconcile-to-zero. Delta does not fetch live state, so it
-   cannot detect that case proactively; it catches the `422` on removal, emits a
-   descriptive error, and defers the correct end state to the next full sync.
+   rejects with `422`.
+
+   A `selected` installation must retain at least one repository, so a change
+   that would drive one to **zero** is surfaced as an error rather than
+   attempted — but *only* when it would actually strip access while
+   safe-settings is managing it. Concretely, an empty desired/required repo set
+   is **not** universally an error:
+   - **Full sync, non-additive, installation would lose all repos** (currently
+     `all` and asked to narrow to none, or currently `selected` with live repos
+     and desired resolves to none) → **error**; the installation is left
+     unchanged. Full sync knows the complete desired set, so it detects this
+     up-front.
+   - **Additive mode** → never an error: additive never narrows or removes, so
+     an empty desired set simply adds nothing.
+   - **Nothing to reconcile** (installation already has no relevant repos) →
+     no-op, no error.
+   - **Org-level `all`** → not applicable; the app is toggled to `all` and the
+     empty case never arises.
+   - **Delta mode** → an empty incremental change is a no-op. Delta does not
+     fetch live state, so it cannot know up-front that a removal would empty the
+     installation; it instead catches the `422` on removal, emits a descriptive
+     error, and defers the correct end state to the next full sync.
+
 
 7. **Churn skip.** In delta mode, if an app's targeting is unchanged between the
    previous and current versions of a file, it is skipped entirely to avoid

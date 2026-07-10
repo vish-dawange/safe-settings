@@ -364,5 +364,30 @@ describe('AppInstallations', () => {
       expect(Array.isArray(result)).toBe(true)
       expect(errors.some(e => /422/.test(e.msg))).toBe(true)
     })
+
+    it("errors (without mutating) when narrowing 'all' to an empty desired set", async () => {
+      const plugin = new AppInstallations(true, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      const result = await plugin.syncFull({
+        copilot: { installation_id: 1, repos: new Set(), current_selection: 'all' }
+      })
+
+      expect(result).toHaveLength(1)
+      expect(result[0].type).toBe('ERROR')
+      expect(errors.some(e => /narrow repository_selection from 'all'/.test(e.msg))).toBe(true)
+      // The over-broad 'all' installation must be left unchanged.
+      expect(appGithub.request).not.toHaveBeenCalled()
+    })
+
+    it("leaves 'all' untouched (no error) for an empty desired set in additive mode", async () => {
+      const plugin = new AppInstallations(true, github, appGithub, { owner: 'org', repo: 'admin' }, 'ent', log, errors)
+      plugin.additive = true
+      const result = await plugin.syncFull({
+        copilot: { installation_id: 1, repos: new Set(), current_selection: 'all' }
+      })
+
+      expect(result).toEqual([])
+      expect(errors).toEqual([])
+      expect(appGithub.request).not.toHaveBeenCalled()
+    })
   })
 })
