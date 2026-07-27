@@ -1224,7 +1224,7 @@ const REPO_TEAM_FILTER_YML = `repository:
 
 teams:
   - name: ${SMOKE_FILTER_TEAMS[0]}
-    permission: pull
+    permission: maintain
     include:
       - ${SMOKE_FILTER_REPO}
   - name: ${SMOKE_FILTER_TEAMS[1]}
@@ -3164,7 +3164,10 @@ async function phase18TeamIncludeExclude () {
     } catch { return null }
   }, { desc: `included team ${SMOKE_FILTER_TEAMS[0]} to be added`, timeout: 60000 })
   assert(includedTeam !== null, `Team "${SMOKE_FILTER_TEAMS[0]}" applied (include glob matches repo)`)
-  if (includedTeam) assert(includedTeam.permission === 'pull', `Included team has pull permission (got: ${includedTeam.permission})`)
+  if (includedTeam) {
+    const hasMaintain = includedTeam.permission === 'maintain' || (includedTeam.permissions && includedTeam.permissions.maintain === true)
+    assert(hasMaintain, `Included team has maintain permission (got: ${includedTeam.permission})`)
+  }
 
   // The excluded and non-matching teams must NOT be applied.
   const finalTeams = await (async () => {
