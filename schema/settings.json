@@ -163,14 +163,14 @@
                 "type": "string"
               },
               "exclude": {
-                "description": "You can exclude a list of repos for this team and all repos except these repos would have this team",
+                "description": "Exclude this team from repos whose names match one of these glob patterns.",
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
               },
               "include": {
-                "description": "You can include a list of repos for this team and only those repos would have this team",
+                "description": "Apply this team only to repos whose names match one of these glob patterns.",
                 "type": "array",
                 "items": {
                   "type": "string"
