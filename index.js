@@ -273,9 +273,15 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     const getMatchingFiles = (commits, type) =>
       commits.flatMap((c) => c[type].filter((file) => pattern.test(file)))
 
+    // Include 'removed' so deleting a suborg config file is detected as a
+    // change. The downstream delta logic loads the current version from the
+    // head ref (which fails for a deleted file, yielding an empty config) and
+    // diffs it against the base ref, correctly detecting removed entries such
+    // as app_installations.
     const changes = [
       ...getMatchingFiles(payload.commits, 'added'),
-      ...getMatchingFiles(payload.commits, 'modified')
+      ...getMatchingFiles(payload.commits, 'modified'),
+      ...getMatchingFiles(payload.commits, 'removed')
     ]
 
     return changes.map((file) => ({
@@ -290,9 +296,15 @@ module.exports = (robot, { getRouter }, Settings = require('./lib/settings')) =>
     const getMatchingFiles = (commits, type) =>
       commits.flatMap((c) => c[type].filter((file) => pattern.test(file)))
 
+    // Include 'removed' so deleting a repo config file is detected as a change.
+    // The downstream delta logic loads the current version from the head ref
+    // (which fails for a deleted file, yielding an empty config) and diffs it
+    // against the base ref, correctly detecting removed entries such as
+    // app_installations.
     const changes = [
       ...getMatchingFiles(payload.commits, 'added'),
-      ...getMatchingFiles(payload.commits, 'modified')
+      ...getMatchingFiles(payload.commits, 'modified'),
+      ...getMatchingFiles(payload.commits, 'removed')
     ]
 
     return changes.map((file) => ({
