@@ -97,6 +97,53 @@ describe('Teams', () => {
     }
   })
 
+  describe('filtering teams by include/exclude', () => {
+    beforeEach(() => {
+      github.repos.listTeams.mockResolvedValue({ data: [] })
+    })
+
+    it('does not add a team when the repo matches an exclude glob', async () => {
+      const plugin = configure([
+        { name: addedTeamName, permission: 'pull', exclude: ['test*'] }
+      ])
+
+      await plugin.sync()
+
+      expect(github.teams.addOrUpdateRepoPermissionsInOrg).not.toHaveBeenCalled()
+    })
+
+    it('does not add a team when the repo is not in an include glob', async () => {
+      const plugin = configure([
+        { name: addedTeamName, permission: 'pull', include: ['other-*'] }
+      ])
+
+      await plugin.sync()
+
+      expect(github.teams.addOrUpdateRepoPermissionsInOrg).not.toHaveBeenCalled()
+    })
+
+    it('adds a team when the repo matches an include glob', async () => {
+      when(github.teams.getByName)
+        .calledWith({ org, team_slug: addedTeamName })
+        .mockResolvedValue({ data: { id: addedTeamId } })
+
+      const plugin = configure([
+        { name: addedTeamName, permission: 'pull', include: ['test*'] }
+      ])
+
+      await plugin.sync()
+
+      expect(github.teams.addOrUpdateRepoPermissionsInOrg).toHaveBeenCalledWith({
+        org,
+        team_id: addedTeamId,
+        team_slug: addedTeamName,
+        owner: org,
+        repo: 'test',
+        permission: 'pull'
+      })
+    })
+  })
+
   describe('external_group linking', () => {
     const externalGroupName = 'Engineering - Expert Services'
     const externalGroupId = 42
