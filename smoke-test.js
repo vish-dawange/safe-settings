@@ -70,8 +70,11 @@ const CONFIG_PATH = process.env.CONFIG_PATH || '.github'
 const APP_ID = process.env.APP_ID
 const PRIVATE_KEY = (process.env.PRIVATE_KEY || '').replace(/\\n/g, '\n')
 
-const TEST_REPOS = ['test', 'demo-repo-service1', 'demo-repo-service2', 'combined-settings-repo']
+const TEST_REPOS = ['test', 'demo-repo-service1', 'demo-repo-service2', 'combined-settings-repo', 'smoke-team-filter']
 const TEST_TEAMS = ['AD-GRP-PAYMENTS-PLATFORM-OWNERS', 'awesometeam-a-approvers', 'jefeish-edj-test']
+// Teams exercised by the team include/exclude filter phase (Phase 18).
+const SMOKE_FILTER_REPO = 'smoke-team-filter'
+const SMOKE_FILTER_TEAMS = ['smoke-filter-included', 'smoke-filter-excluded', 'smoke-filter-nomatch']
 
 // Principals created on demand for the ruleset name-resolution phase (Phase 16)
 const SMOKE_NR_TEAM = 'safe-settings-smoke-nr-team'
@@ -1204,6 +1207,34 @@ const REPO_YML_NO_VARS = `repository:
   private: true
 
 variables: []
+`
+
+// Config for Phase 18: a repo-level config whose team entries carry
+// include/exclude repo filters. Only the team whose include glob matches the
+// repo name (or that is not excluded) should be applied by safe-settings.
+//   - smoke-filter-included: include matches -> applied
+//   - smoke-filter-excluded: exclude matches -> NOT applied
+//   - smoke-filter-nomatch : include does not match -> NOT applied
+const REPO_TEAM_FILTER_YML = `repository:
+  name: ${SMOKE_FILTER_REPO}
+  description: Repo for team include/exclude smoke test
+  private: true
+  auto_init: true
+  force_create: true
+
+teams:
+  - name: ${SMOKE_FILTER_TEAMS[0]}
+    permission: pull
+    include:
+      - ${SMOKE_FILTER_REPO}
+  - name: ${SMOKE_FILTER_TEAMS[1]}
+    permission: pull
+    exclude:
+      - ${SMOKE_FILTER_REPO}
+  - name: ${SMOKE_FILTER_TEAMS[2]}
+    permission: pull
+    include:
+      - no-such-repo-*
 `
 
 // ─── Test Phases ─────────────────────────────────────────────────────────────
@@ -2471,6 +2502,7 @@ async function teardown () {
   log('Deleting test teams...')
   for (const team of TEST_TEAMS) { await deleteTeam(ORG, team.toLowerCase()) }
   try { await deleteTeam(ORG, SMOKE_NR_TEAM) } catch { /* ok */ }
+  for (const team of SMOKE_FILTER_TEAMS) { try { await deleteTeam(ORG, team) } catch { /* ok */ } }
 
   log('Deleting custom repository role...')
   try { await deleteCustomRepositoryRole(ORG, 'security-engineer') } catch { /* ok */ }
@@ -3095,6 +3127,61 @@ async function phase17AppInstallations () {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
+async function phase18TeamIncludeExclude () {
+  logPhase('Phase 18: Team include/exclude repo filters')
+  const branch = 'smoke-test-phase18'
+  const defaultBranch = await getDefaultBranch()
+
+  // Clean any leftover teams from a previous aborted run so the "not applied"
+  // assertions can't be satisfied by stale repo-team associations.
+  await deleteRepo(ORG, SMOKE_FILTER_REPO)
+  for (const t of SMOKE_FILTER_TEAMS) { await deleteTeam(ORG, t) }
+
+  await deleteBranch(ORG, ADMIN_REPO, branch)
+  await createBranch(ORG, ADMIN_REPO, branch)
+  await createOrUpdateFile(ORG, ADMIN_REPO, `${CONFIG_PATH}/repos/${SMOKE_FILTER_REPO}.yml`, REPO_TEAM_FILTER_YML, branch, 'Add team include/exclude filter config')
+
+  const pr = await createPR(ORG, ADMIN_REPO, 'Smoke test: team include/exclude filters', branch, defaultBranch)
+  log('Waiting for NOP check run...')
+  await sleep(WEBHOOK_SETTLE_MS)
+  const checkRun = await waitForCheckRun(ORG, ADMIN_REPO, pr.head.sha)
+  assert(checkRun !== null, 'Check run completed')
+  if (checkRun) assert(checkRun.conclusion === 'success', `Check run conclusion is success (got: ${checkRun.conclusion})`)
+
+  if (!await safeMerge(ORG, ADMIN_REPO, pr.number)) return
+  await sleep(WEBHOOK_SETTLE_MS)
+
+  const repo = await poll(async () => {
+    try { return (await octokit.rest.repos.get({ owner: ORG, repo: SMOKE_FILTER_REPO })).data } catch { return null }
+  }, { desc: `${SMOKE_FILTER_REPO} to be created` })
+  assert(repo !== null, `Repo "${SMOKE_FILTER_REPO}" was created`)
+
+  // The included team should be applied (poll — safe-settings may still be working).
+  const includedTeam = await poll(async () => {
+    try {
+      const { data: teams } = await octokit.rest.repos.listTeams({ owner: ORG, repo: SMOKE_FILTER_REPO })
+      return teams.find(t => t.slug === SMOKE_FILTER_TEAMS[0]) || null
+    } catch { return null }
+  }, { desc: `included team ${SMOKE_FILTER_TEAMS[0]} to be added`, timeout: 60000 })
+  assert(includedTeam !== null, `Team "${SMOKE_FILTER_TEAMS[0]}" applied (include glob matches repo)`)
+  if (includedTeam) assert(includedTeam.permission === 'pull', `Included team has pull permission (got: ${includedTeam.permission})`)
+
+  // The excluded and non-matching teams must NOT be applied.
+  const finalTeams = await (async () => {
+    try {
+      const { data: teams } = await octokit.rest.repos.listTeams({ owner: ORG, repo: SMOKE_FILTER_REPO })
+      return teams.map(t => t.slug)
+    } catch { return [] }
+  })()
+  assert(!finalTeams.includes(SMOKE_FILTER_TEAMS[1]), `Team "${SMOKE_FILTER_TEAMS[1]}" NOT applied (exclude glob matches repo)`)
+  assert(!finalTeams.includes(SMOKE_FILTER_TEAMS[2]), `Team "${SMOKE_FILTER_TEAMS[2]}" NOT applied (include glob does not match repo)`)
+
+  // Cleanup for standalone --phase 18 runs (teardown also cleans these).
+  await deleteRepo(ORG, SMOKE_FILTER_REPO)
+  for (const t of SMOKE_FILTER_TEAMS) { await deleteTeam(ORG, t) }
+  await deleteBranch(ORG, ADMIN_REPO, branch)
+}
+
 async function main () {
   const { App } = await import('octokit')
   const app = new App({ appId: APP_ID, privateKey: PRIVATE_KEY })
@@ -3162,7 +3249,8 @@ async function main () {
       ['Phase 14: regressions', phase14RegressionCoverage],
       ['Phase 15: Ruleset array drift', phase15RulesetArrayDrift],
       ['Phase 16: Ruleset name/slug resolution', phase16RulesetNameResolution],
-      ['Phase 17: App installation management', phase17AppInstallations]
+      ['Phase 17: App installation management', phase17AppInstallations],
+      ['Phase 18: Team include/exclude filters', phase18TeamIncludeExclude]
     ]
 
     // When --phase is given, only run setup (phase 0) + the requested phase(s).
