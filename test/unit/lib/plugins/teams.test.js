@@ -15,7 +15,7 @@ describe('Teams', () => {
   const org = 'bkeepers'
 
   function configure (config) {
-    const log = { debug: jest.fn(), error: console.error }
+    const log = { debug: jest.fn(), error: console.error, warn: console.warn }
     const errors = []
     return new Teams(undefined, github, { owner: 'bkeepers', repo: 'test' }, config, log, errors)
   }
@@ -192,7 +192,7 @@ describe('Teams', () => {
       )
     })
 
-    it('logs an error and skips when the external group name is not found', async () => {
+    it('logs a warning (not an error) and skips when the external group name is not found', async () => {
       const plugin = configure([
         { name: unchangedTeamName, permission: 'push', external_group: 'Nonexistent Group' }
       ])
@@ -203,12 +203,12 @@ describe('Teams', () => {
         'PATCH /orgs/{org}/teams/{team_slug}/external-groups',
         expect.anything()
       )
-      // logError pushes onto the errors array
-      expect(plugin.errors.some(e => /Nonexistent Group/.test(JSON.stringify(e)))).toBe(true)
+      // Non-fatal: should not push onto the errors array
+      expect(plugin.errors.some(e => /Nonexistent Group/.test(JSON.stringify(e)))).toBe(false)
     })
 
-    it('in nop mode, emits an ERROR NopCommand when the external group is not found (so it appears in the PR check_run)', async () => {
-      const log = { debug: jest.fn(), error: console.error }
+    it('in nop mode, emits a WARNING NopCommand when the external group is not found (so it appears in the PR check_run without failing it)', async () => {
+      const log = { debug: jest.fn(), error: console.error, warn: console.warn }
       const errors = []
       const Teams = require('../../../../lib/plugins/teams')
       const plugin = new Teams(true, github, { owner: org, repo: 'test' }, [
@@ -218,8 +218,9 @@ describe('Teams', () => {
       const result = await plugin.sync()
 
       expect(Array.isArray(result)).toBe(true)
-      const errorCmd = result.find(c => c && c.type === 'ERROR' && /Nonexistent Group/.test(JSON.stringify(c)))
-      expect(errorCmd).toBeDefined()
+      const warningCmd = result.find(c => c && c.type === 'WARNING' && /Nonexistent Group/.test(JSON.stringify(c)))
+      expect(warningCmd).toBeDefined()
+      expect(result.some(c => c && c.type === 'ERROR')).toBe(false)
       expect(github.request).not.toHaveBeenCalledWith(
         'PATCH /orgs/{org}/teams/{team_slug}/external-groups',
         expect.anything()
