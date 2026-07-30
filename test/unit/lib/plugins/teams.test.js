@@ -23,9 +23,12 @@ describe('Teams', () => {
   beforeEach(() => {
     github = {
       paginate: jest.fn()
-        .mockImplementation(async (fetch) => {
-          const response = await fetch()
-          return response.data
+        .mockImplementation(async (fetchOrRoute) => {
+          if (typeof fetchOrRoute === 'function') {
+            const response = await fetchOrRoute()
+            return response.data
+          }
+          return []
         }),
       teams: {
         create: jest.fn().mockResolvedValue(),
@@ -41,7 +44,7 @@ describe('Teams', () => {
           ]
         })
       },
-      request: jest.fn().mockResolvedValue()
+      request: Object.assign(jest.fn().mockResolvedValue(), { endpoint: jest.fn().mockReturnValue('endpoint-stub') })
     }
   })
 
@@ -95,6 +98,201 @@ describe('Teams', () => {
         }
       )
     }
+  })
+
+  describe('security manager teams', () => {
+    const securityManagerRoleId = any.integer()
+    const securityManagerTeamName = 'security-managers'
+    const securityManagerTeamId = any.integer()
+    const organizationRolesRoute = 'GET /orgs/{org}/organization-roles'
+    const organizationRoleTeamsRoute = 'GET /orgs/{org}/organization-roles/{role_id}/teams'
+    const roleFailureStatuses = [403, 404, 422, 500]
+    const repoTeams = [
+      { id: securityManagerTeamId, slug: securityManagerTeamName, name: 'Security Managers', permission: 'admin' },
+      { id: unchangedTeamId, slug: unchangedTeamName, permission: 'push' },
+      { id: removedTeamId, slug: removedTeamName, permission: 'push' },
+      { id: updatedTeamId, slug: updatedTeamName, permission: 'pull' }
+    ]
+
+    beforeEach(() => {
+      github.repos.listTeams.mockResolvedValue({ data: repoTeams })
+    })
+
+    function expectTeamDeleted (teamSlug) {
+      expect(github.request).toHaveBeenCalledWith(
+        'DELETE /orgs/:owner/teams/:team_slug/repos/:owner/:repo',
+        {
+          org,
+          owner: org,
+          repo: 'test',
+          team_slug: teamSlug
+        }
+      )
+    }
+
+    function expectTeamNotDeleted (teamSlug) {
+      expect(github.request).not.toHaveBeenCalledWith(
+        'DELETE /orgs/:owner/teams/:team_slug/repos/:owner/:repo',
+        {
+          org,
+          owner: org,
+          repo: 'test',
+          team_slug: teamSlug
+        }
+      )
+    }
+
+    function expectNoTeamsDeleted () {
+      expect(github.request).not.toHaveBeenCalledWith(
+        'DELETE /orgs/:owner/teams/:team_slug/repos/:owner/:repo',
+        expect.any(Object)
+      )
+    }
+
+    it('syncs non-security-manager teams and leaves security manager teams untouched', async () => {
+      const plugin = configure([
+        { name: unchangedTeamName, permission: 'push' },
+        { name: updatedTeamName, permission: 'admin' },
+        { name: addedTeamName, permission: 'pull' }
+      ])
+
+      when(github.paginate)
+        .calledWith(organizationRolesRoute, { org })
+        .mockResolvedValue({ roles: [{ id: securityManagerRoleId, name: 'Security Manager' }] })
+
+      when(github.paginate)
+        .calledWith(organizationRoleTeamsRoute, { org, role_id: securityManagerRoleId })
+        .mockResolvedValue({ teams: [{ slug: securityManagerTeamName, name: 'Security Managers' }] })
+
+      when(github.teams.getByName)
+        .defaultResolvedValue({})
+        .calledWith({ org, team_slug: addedTeamName })
+        .mockResolvedValue({ data: { id: addedTeamId } })
+
+      await plugin.sync()
+
+      expect(github.paginate).toHaveBeenCalledWith(organizationRolesRoute, { org })
+      expect(github.paginate).toHaveBeenCalledWith(organizationRoleTeamsRoute, { org, role_id: securityManagerRoleId })
+      expectTeamDeleted(removedTeamName)
+      expectTeamNotDeleted(securityManagerTeamName)
+    })
+
+    it.each(roleFailureStatuses)('skips deletions when organization role lookup fails with %s', async status => {
+      const plugin = configure([
+        { name: unchangedTeamName, permission: 'push' }
+      ])
+
+      when(github.paginate)
+        .calledWith(organizationRolesRoute, { org })
+        .mockRejectedValue({ status })
+
+      await plugin.sync()
+
+      expectNoTeamsDeleted()
+    })
+
+    it.each(roleFailureStatuses)('skips deletions when organization role team lookup fails with %s', async status => {
+      const plugin = configure([
+        { name: unchangedTeamName, permission: 'push' }
+      ])
+
+      when(github.paginate)
+        .calledWith(organizationRolesRoute, { org })
+        .mockResolvedValue({ roles: [{ id: securityManagerRoleId, slug: 'security_manager' }] })
+
+      when(github.paginate)
+        .calledWith(organizationRoleTeamsRoute, { org, role_id: securityManagerRoleId })
+        .mockRejectedValue({ status })
+
+      await plugin.sync()
+
+      expectNoTeamsDeleted()
+    })
+
+    it('matches configured team names to existing slugs without add or remove churn', async () => {
+      const formattedTeamName = 'Platform & Security!'
+
+      github.repos.listTeams.mockResolvedValue({
+        data: [{ id: unchangedTeamId, slug: 'platform-security', name: formattedTeamName, permission: 'push' }]
+      })
+
+      const plugin = configure([
+        { name: formattedTeamName, permission: 'push' }
+      ])
+
+      await plugin.sync()
+
+      expect(github.teams.getByName).not.toHaveBeenCalled()
+      expectNoTeamsDeleted()
+    })
+
+    it('matches security manager team names against repository team slugs', async () => {
+      github.repos.listTeams.mockResolvedValue({
+        data: [{ id: securityManagerTeamId, slug: securityManagerTeamName, permission: 'admin' }]
+      })
+
+      when(github.paginate)
+        .calledWith(organizationRolesRoute, { org })
+        .mockResolvedValue({ roles: [{ id: securityManagerRoleId, name: 'Security Manager' }] })
+
+      when(github.paginate)
+        .calledWith(organizationRoleTeamsRoute, { org, role_id: securityManagerRoleId })
+        .mockResolvedValue({ teams: [{ name: 'Security Managers' }] })
+
+      const plugin = configure([])
+
+      await expect(plugin.find()).resolves.toEqual([])
+    })
+
+    it('uses normalized team slugs when adding configured team names', async () => {
+      const formattedTeamName = 'Platform & Security!'
+
+      github.repos.listTeams.mockResolvedValue({ data: [] })
+
+      when(github.teams.getByName)
+        .calledWith({ org, team_slug: 'platform-security' })
+        .mockResolvedValue({ data: { id: addedTeamId, slug: 'platform-security' } })
+
+      const plugin = configure([
+        { name: formattedTeamName, permission: 'pull' }
+      ])
+
+      await plugin.sync()
+
+      expect(github.teams.addOrUpdateRepoPermissionsInOrg).toHaveBeenCalledWith({
+        org,
+        team_id: addedTeamId,
+        team_slug: 'platform-security',
+        owner: org,
+        repo: 'test',
+        permission: 'pull'
+      })
+    })
+
+    it('returns original teams when the security manager role is absent', async () => {
+      const plugin = configure([])
+
+      when(github.paginate)
+        .calledWith(organizationRolesRoute, { org })
+        .mockResolvedValue({ roles: [{ id: any.integer(), name: 'compliance_manager' }] })
+
+      await expect(plugin.find()).resolves.toEqual(repoTeams)
+      expect(github.paginate).not.toHaveBeenCalledWith(organizationRoleTeamsRoute, { org, role_id: securityManagerRoleId })
+    })
+
+    it('returns original teams when organization role team lookup fails', async () => {
+      const plugin = configure([])
+
+      when(github.paginate)
+        .calledWith(organizationRolesRoute, { org })
+        .mockResolvedValue({ roles: [{ id: securityManagerRoleId, slug: 'security_manager' }] })
+
+      when(github.paginate)
+        .calledWith(organizationRoleTeamsRoute, { org, role_id: securityManagerRoleId })
+        .mockRejectedValue({ status: 500 })
+
+      await expect(plugin.find()).resolves.toEqual(repoTeams)
+    })
   })
 
   describe('external_group linking', () => {
