@@ -177,6 +177,53 @@ describe('Teams', () => {
       expectTeamNotDeleted(securityManagerTeamName)
     })
 
+    it('does not add or update a security manager team even when it is listed in the config', async () => {
+      const plugin = configure([
+        { name: securityManagerTeamName, permission: 'pull' },
+        { name: unchangedTeamName, permission: 'push' }
+      ])
+
+      when(github.paginate)
+        .calledWith(organizationRolesRoute, { org })
+        .mockResolvedValue({ roles: [{ id: securityManagerRoleId, name: 'Security Manager' }] })
+
+      when(github.paginate)
+        .calledWith(organizationRoleTeamsRoute, { org, role_id: securityManagerRoleId })
+        .mockResolvedValue({ teams: [{ slug: securityManagerTeamName, name: 'Security Managers' }] })
+
+      await plugin.sync()
+
+      expect(github.teams.getByName).not.toHaveBeenCalledWith({ org, team_slug: securityManagerTeamName })
+      expect(github.teams.addOrUpdateRepoPermissionsInOrg).not.toHaveBeenCalled()
+      expect(github.request).not.toHaveBeenCalledWith(
+        'PUT /orgs/:owner/teams/:team_slug/repos/:owner/:repo',
+        expect.objectContaining({ team_slug: securityManagerTeamName })
+      )
+      expectTeamNotDeleted(securityManagerTeamName)
+    })
+
+    it('emits an INFO nop command instead of managing a configured security manager team in nop mode', async () => {
+      const log = { debug: jest.fn(), error: jest.fn(), warn: jest.fn() }
+      const plugin = new Teams(true, github, { owner: org, repo: 'test' }, [
+        { name: securityManagerTeamName, permission: 'pull' }
+      ], log, [])
+
+      when(github.paginate)
+        .calledWith(organizationRolesRoute, { org })
+        .mockResolvedValue({ roles: [{ id: securityManagerRoleId, name: 'Security Manager' }] })
+
+      when(github.paginate)
+        .calledWith(organizationRoleTeamsRoute, { org, role_id: securityManagerRoleId })
+        .mockResolvedValue({ teams: [{ slug: securityManagerTeamName, name: 'Security Managers' }] })
+
+      const result = await plugin.sync()
+
+      expect(Array.isArray(result)).toBe(true)
+      const flattened = result.flat(Infinity)
+      expect(flattened.some(c => c && c.type === 'INFO' && /security manager team/i.test(JSON.stringify(c)))).toBe(true)
+      expect(github.teams.addOrUpdateRepoPermissionsInOrg).not.toHaveBeenCalled()
+    })
+
     it.each(roleFailureStatuses)('skips deletions when organization role lookup fails with %s', async status => {
       const plugin = configure([
         { name: unchangedTeamName, permission: 'push' }
