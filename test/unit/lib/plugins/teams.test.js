@@ -256,6 +256,24 @@ describe('Teams', () => {
       expectNoTeamsDeleted()
     })
 
+    it('emits an INFO nop command when skipping deletion in nop mode after discovery failure', async () => {
+      const log = { debug: jest.fn(), error: jest.fn(), warn: jest.fn() }
+      const plugin = new Teams(true, github, { owner: org, repo: 'test' }, [
+        { name: unchangedTeamName, permission: 'push' }
+      ], log, [])
+
+      when(github.paginate)
+        .calledWith(organizationRolesRoute, { org })
+        .mockRejectedValue({ status: 500 })
+
+      const result = await plugin.sync()
+
+      expect(Array.isArray(result)).toBe(true)
+      const flattened = result.flat(Infinity)
+      expect(flattened.some(c => c && c.type === 'INFO' && /security manager team discovery failed/i.test(JSON.stringify(c)))).toBe(true)
+      expectNoTeamsDeleted()
+    })
+
     it('matches configured team names to existing slugs without add or remove churn', async () => {
       const formattedTeamName = 'Platform & Security!'
 
