@@ -419,62 +419,54 @@
       "description": "Teams",
       "type": "array",
       "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "The name of the team."
-          },
-          "description": {
-            "type": "string",
-            "description": "The description of the team."
-          },
-          "maintainers": {
-            "type": "array",
-            "description": "List GitHub usernames for organization members who will become team maintainers.",
-            "items": {
-              "type": "string"
+        "allOf": [
+          {
+            "type": "object",
+            "properties": {
+              "permission": {
+                "type": "string",
+                "description": "The permission to grant the team on this repository. We accept the following permissions to be set: `pull`, `triage`, `push`, `maintain`, `admin` and you can also specify a custom repository role name, if the owning organization has defined any. If no permission is specified, the team's `permission` attribute will be used to determine what permission to grant the team on this repository."
+              }
             }
           },
-          "repo_names": {
-            "type": "array",
-            "description": "The full name (e.g., \"organization-name/repository-name\") of repositories to add the team to.",
-            "items": {
-              "type": "string"
-            }
-          },
-          "privacy": {
-            "type": "string",
-            "description": "The level of privacy this team should have. The options are:  \n**For a non-nested team:**  \n * `secret` - only visible to organization owners and members of this team.  \n * `closed` - visible to all members of this organization.  \nDefault: `secret`  \n**For a parent or child team:**  \n * `closed` - visible to all members of this organization.  \nDefault for child team: `closed`",
-            "enum": [
-              "secret",
-              "closed"
-            ]
-          },
-          "notification_setting": {
-            "type": "string",
-            "description": "The notification setting the team has chosen. The options are:  \n * `notifications_enabled` - team members receive notifications when the team is @mentioned.  \n * `notifications_disabled` - no one receives notifications.  \nDefault: `notifications_enabled`",
-            "enum": [
-              "notifications_enabled",
-              "notifications_disabled"
-            ]
-          },
-          "permission": {
-            "type": "string",
-            "description": "**Closing down notice**. The permission that new repositories will be added to the team with when none is specified.",
-            "enum": [
-              "pull",
-              "push"
+          {
+            "type": "object",
+            "required": [
+              "name"
             ],
-            "default": "pull"
-          },
-          "parent_team_id": {
-            "type": "integer",
-            "description": "The ID of a team to set as the parent team."
+            "properties": {
+              "name": {
+                "description": "The name (or slug) of the team to grant access to the repo.",
+                "type": "string"
+              },
+              "privacy": {
+                "description": "The level of privacy the team should have when it is created by safe-settings. The options are `secret` (visible only to organization owners and members of the team) or `closed` (visible to all members of the organization).",
+                "type": "string",
+                "enum": [
+                  "secret",
+                  "closed"
+                ]
+              },
+              "external_group": {
+                "description": "The display name of an external IdP group to link to this team.",
+                "type": "string"
+              },
+              "exclude": {
+                "description": "Exclude this team from repos whose names match one of these glob patterns.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "include": {
+                "description": "Apply this team only to repos whose names match one of these glob patterns.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
           }
-        },
-        "required": [
-          "name"
         ]
       }
     },
@@ -1223,6 +1215,49 @@
                           "type": "boolean",
                           "description": "New, reviewable commits pushed will dismiss previous pull request review approvals."
                         },
+                        "dismissal_restriction": {
+                          "title": "DismissalRestriction",
+                          "description": "Specify people, teams, or apps allowed to dismiss pull request reviews.",
+                          "type": "object",
+                          "properties": {
+                            "allowed_actors": {
+                              "type": "array",
+                              "description": "Specify people, teams, or apps allowed to dismiss pull request reviews.",
+                              "items": {
+                                "title": "Actor",
+                                "description": "An actor allowed to dismiss pull request reviews",
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "integer",
+                                    "description": "ID of the actor that can dismiss reviews."
+                                  },
+                                  "type": {
+                                    "type": "string",
+                                    "description": "The type of the actor",
+                                    "enum": [
+                                      "User",
+                                      "Team",
+                                      "IntegrationInstallation",
+                                      "RepositoryRole"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "type"
+                                ]
+                              }
+                            },
+                            "enabled": {
+                              "type": "boolean",
+                              "description": "Whether to restrict review dismissal to specific actors."
+                            }
+                          },
+                          "required": [
+                            "enabled"
+                          ]
+                        },
                         "require_code_owner_review": {
                           "type": "boolean",
                           "description": "Require an approving review in pull requests that modify files that have a designated code owner."
@@ -1937,8 +1972,25 @@
         }
       }
     },
+    "app_installations": {
+      "description": "Manage which repositories a GitHub App installation can access. The target is a GitHub App installation rather than a repository. Repo selection follows the config hierarchy: org-level settings.yml selects all repos in the org; suborgs/*.yml selects repos by the suborg's targeting criteria; repos/*.yml adds the specific repo. Requires safe-settings to be installed on the enterprise with 'Enterprise organization installations' permission.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "app_slug"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "app_slug": {
+            "type": "string",
+            "description": "The slug of the GitHub App installation to manage."
+          }
+        }
+      }
+    },
     "additive_plugins": {
-      "description": "List of Diffable plugins to run in additive mode. In additive mode the plugin will only add and update entries; it will never call remove(), so items that exist on GitHub but are absent from the YAML are preserved. Only Diffable-extending plugins are supported (labels, collaborators, teams, milestones, autolinks, environments, custom_properties, variables, rulesets, custom_repository_roles). Declare only in settings.yml (org level) to keep behavior consistent across all repos.",
+      "description": "List of plugins to run in additive mode. In additive mode the plugin will only add and update entries; it will never call remove(), so items that exist on GitHub but are absent from the YAML are preserved. Supported plugins: labels, collaborators, teams, milestones, autolinks, environments, custom_properties, variables, rulesets, custom_repository_roles, app_installations. Declare only in settings.yml (org level) to keep behavior consistent across all repos.",
       "type": "array",
       "items": {
         "type": "string",
@@ -1952,7 +2004,8 @@
           "custom_properties",
           "variables",
           "rulesets",
-          "custom_repository_roles"
+          "custom_repository_roles",
+          "app_installations"
         ]
       }
     },
@@ -1977,7 +2030,8 @@
               "custom_properties",
               "custom_repository_roles",
               "variables",
-              "archive"
+              "archive",
+              "app_installations"
             ]
           },
           {
@@ -2003,7 +2057,8 @@
                   "custom_properties",
                   "custom_repository_roles",
                   "variables",
-                  "archive"
+                  "archive",
+                  "app_installations"
                 ]
               },
               "target": {
