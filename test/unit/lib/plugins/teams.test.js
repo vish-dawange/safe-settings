@@ -44,7 +44,7 @@ describe('Teams', () => {
           ]
         })
       },
-      request: Object.assign(jest.fn().mockResolvedValue(), { endpoint: jest.fn().mockReturnValue('endpoint-stub') })
+      request: Object.assign(jest.fn().mockResolvedValue(), { endpoint: jest.fn().mockReturnValue({ url: 'endpoint-stub', body: {} }) })
     }
   })
 
@@ -403,7 +403,7 @@ describe('Teams', () => {
         }
         return Promise.resolve({ data: {} })
       })
-      github.request.endpoint = jest.fn().mockReturnValue('endpoint-stub')
+      github.request.endpoint = jest.fn().mockReturnValue({ url: 'endpoint-stub', body: {} })
 
       // paginate: route the external-groups list call to a single page; keep
       // the original implementation for other paginated endpoints. The real
@@ -466,7 +466,7 @@ describe('Teams', () => {
         }
         return Promise.resolve({ data: {} })
       })
-      github.request.endpoint = jest.fn().mockReturnValue('endpoint-stub')
+      github.request.endpoint = jest.fn().mockReturnValue({ url: 'endpoint-stub', body: {} })
 
       const plugin = configure([
         { name: unchangedTeamName, permission: 'push', external_group: externalGroupName }
