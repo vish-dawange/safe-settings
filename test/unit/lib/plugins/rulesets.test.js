@@ -179,6 +179,84 @@ describe('Rulesets', () => {
     })
   })
 
+  describe('idempotent create when the ruleset already exists (retried/concurrent POST)', () => {
+    function duplicateNameError () {
+      const e = new Error('Validation Failed')
+      e.status = 422
+      e.response = { data: { errors: ['Name must be unique'] } }
+      return e
+    }
+
+    function wireRequest (routeResults) {
+      const calls = []
+      const request = jest.fn().mockImplementation((route, body) => {
+        calls.push({ route, body })
+        const handler = routeResults[route]
+        return handler ? handler() : Promise.resolve({ url: route })
+      })
+      request.endpoint = jest.fn().mockImplementation((route, body) => ({ url: route, body }))
+      request.endpoint.merge = jest.fn().mockImplementation((route, body) => ({ method: 'GET', url: route, ...body }))
+      github.request = request
+      return calls
+    }
+
+    it('reconciles a repo ruleset by updating the existing one on 422 "Name must be unique"', async () => {
+      const attrs = generateRequestRuleset(0, 'synk', repo_conditions, [])
+      delete attrs.id
+      const existing = generateResponseRuleset(42, 'synk', repo_conditions, [])
+      const calls = wireRequest({
+        'POST /repos/{owner}/{repo}/rulesets': () => Promise.reject(duplicateNameError())
+      })
+      github.paginate = jest.fn()
+        .mockResolvedValueOnce([{ id: 42, name: 'synk', source_type: 'Repository' }])
+        .mockResolvedValueOnce([existing])
+
+      const plugin = configure([attrs])
+      await plugin.add(attrs)
+
+      const put = calls.find(c => c.route === 'PUT /repos/{owner}/{repo}/rulesets/{id}')
+      expect(put).toBeDefined()
+      expect(put.body.id).toBe(42)
+    })
+
+    it('reconciles an org ruleset by updating the existing one on 422 "Name must be unique"', async () => {
+      const attrs = generateRequestRuleset(0, 'synk', org_conditions, [], true)
+      delete attrs.id
+      const existing = generateResponseRuleset(7, 'synk', org_conditions, [], true)
+      const calls = wireRequest({
+        'POST /orgs/{org}/rulesets': () => Promise.reject(duplicateNameError())
+      })
+      github.paginate = jest.fn()
+        .mockResolvedValueOnce([{ id: 7, name: 'synk', source_type: 'Organization' }])
+        .mockResolvedValueOnce([existing])
+
+      const plugin = configure([attrs], 'org')
+      await plugin.add(attrs)
+
+      const put = calls.find(c => c.route === 'PUT /orgs/{org}/rulesets/{id}')
+      expect(put).toBeDefined()
+      expect(put.body.id).toBe(7)
+    })
+
+    it('does not reconcile (surfaces the error) for a 422 that is not a name-uniqueness violation', async () => {
+      const attrs = generateRequestRuleset(0, 'synk', repo_conditions, [])
+      delete attrs.id
+      const other = new Error('Validation Failed')
+      other.status = 422
+      other.response = { data: { errors: ['Something else is invalid'] } }
+      const calls = wireRequest({
+        'POST /repos/{owner}/{repo}/rulesets': () => Promise.reject(other)
+      })
+      github.paginate = jest.fn()
+
+      const plugin = configure([attrs])
+      await plugin.add(attrs)
+
+      expect(github.paginate).not.toHaveBeenCalled()
+      expect(calls.some(c => c.route === 'PUT /repos/{owner}/{repo}/rulesets/{id}')).toBe(false)
+    })
+  })
+
   describe('when {{EXTERNALLY_DEFINED}} is present in "required_status_checks" and no status checks exist in GitHub', () => {
     it('it initialises the status checks with an empty list', () => {
       // Mock the GitHub API response
