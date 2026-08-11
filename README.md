@@ -859,6 +859,10 @@ You can pass environment variables; the easiest way to do it is via a `.env` fil
   ```
   BLOCK_REPO_RENAME_BY_HUMAN=true
   ```
+1. Create the configured `default_branch` instead of renaming the current one using `CREATE_DEFAULT_BRANCH` (default is `false`). By default, when `repository.default_branch` is configured and differs from the repo's current default branch, `safe-settings` renames the current default branch to the configured name. When `CREATE_DEFAULT_BRANCH=true`, if the configured `default_branch` does not exist, `safe-settings` instead creates a new branch off the current default branch and sets it as the default, leaving the existing default branch untouched (no rename). If the configured branch already exists, it is simply set as the default. For e.g.
+  ```
+  CREATE_DEFAULT_BRANCH=true
+  ```
 
 
 ### Runtime Settings
