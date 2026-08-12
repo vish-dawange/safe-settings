@@ -162,6 +162,19 @@ describe('Repository', () => {
           })
         })
       })
+
+      it('propagates errors when branch creation fails instead of swallowing them', () => {
+        github.git.createRef.mockRejectedValueOnce({ status: 422, message: 'boom' })
+        const errors = []
+        const plugin = new Repository(false, github, { owner: 'bkeepers', repo: 'test' }, { default_branch: 'main' }, 1, log, errors)
+        const resArray = []
+        return expect(plugin.createDefaultBranch('master', 'main', resArray)).rejects.toEqual({ status: 422, message: 'boom' }).then(() => {
+          // The failure is recorded rather than silently swallowed, and the
+          // default branch is never updated when branch creation fails.
+          expect(errors).toHaveLength(1)
+          expect(github.repos.update).not.toHaveBeenCalled()
+        })
+      })
     })
   })
 })
