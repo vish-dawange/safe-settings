@@ -479,6 +479,35 @@ describe('Teams', () => {
       expect(plugin.hasChanges).toBe(true)
     })
 
+    it('normalizes a display-name team to its slug when linking the external group', async () => {
+      // Regression: syncExternalGroup previously used the raw config name as
+      // team_slug, so a display name like "Platform & Security!" 404'd against
+      // the external-groups endpoints. It must be normalized to "platform-security".
+      const displayName = 'Platform & Security!'
+      const expectedSlug = 'platform-security'
+
+      when(github.rest.teams.getByName)
+        .defaultResolvedValue({})
+        .calledWith({ org, team_slug: expectedSlug })
+        .mockResolvedValue({ data: { id: addedTeamId } })
+
+      const plugin = configure([
+        { name: displayName, permission: 'pull', external_group: externalGroupName }
+      ])
+
+      await plugin.sync()
+
+      // Idempotency GET and the PATCH must both target the normalized slug.
+      expect(github.request).toHaveBeenCalledWith(
+        'GET /orgs/{org}/teams/{team_slug}/external-groups',
+        { org, team_slug: expectedSlug }
+      )
+      expect(github.request).toHaveBeenCalledWith(
+        'PATCH /orgs/{org}/teams/{team_slug}/external-groups',
+        { org, team_slug: expectedSlug, group_id: externalGroupId }
+      )
+    })
+
     it('skips the PATCH when the team is already linked to the same group', async () => {
       github.request = jest.fn().mockImplementation((endpoint, params) => {
         if (endpoint === 'GET /orgs/{org}/teams/{team_slug}/external-groups') {
